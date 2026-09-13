@@ -1,0 +1,30 @@
+{
+  "name": "home-compute",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A small scheduled-job control plane for self-hosted Bacalhau workers.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sprintengine/home-compute.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sprintengine/home-compute/issues"
+  },
+  "homepage": "https://github.com/sprintengine/home-compute#readme",
+  "type": "module",
+  "workspaces": [
+    "studio-module"
+  ],
+  "bin": {
+    "home-compute": "./src/cli.mjs"
+  },
+  "scripts": {
+    "build:studio": "npm run build --workspace @home-compute/studio-module",
+    "check": "node --check src/*.mjs && node --test && npm run check --workspace @home-compute/studio-module",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "Apache-2.0"
+}

@@ -1,0 +1,29 @@
+{
+  "pollEvery": "30s",
+  "stateFile": ".home-compute/state.json",
+  "envFile": ".env",
+  "api": {
+    "host": "127.0.0.1",
+    "port": 4786,
+    "tokenEnv": "HOME_COMPUTE_API_TOKEN"
+  },
+  "bacalhau": {
+    "binary": "bacalhau",
+    "apiHost": "127.0.0.1",
+    "apiPort": 1234
+  },
+  "jobs": [
+    {
+      "id": "hello-batch",
+      "schedule": { "every": "1h" },
+      "labels": { "application": "example" },
+      "task": {
+        "image": "busybox:1.37",
+        "parameters": ["sh", "-c", "date -u && echo hello from home-compute"],
+        "resources": { "cpu": "0.25", "memory": "128Mb", "disk": "128Mb" },
+        "network": { "type": "None" },
+        "timeouts": { "queueSeconds": 300, "totalSeconds": 300 }
+      }
+    }
+  ]
+}

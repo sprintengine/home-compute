@@ -1,0 +1,16 @@
+[Unit]
+Description=Home Compute scheduled job controller
+After=network-online.target bacalhau.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/home-compute
+EnvironmentFile=-/opt/home-compute/.env
+ExecStart=/usr/bin/node /opt/home-compute/src/cli.mjs daemon
+Restart=on-failure
+RestartSec=5
+User=home-compute
+
+[Install]
+WantedBy=multi-user.target

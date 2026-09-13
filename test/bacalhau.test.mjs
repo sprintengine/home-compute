@@ -1,0 +1,67 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+import { BacalhauClient, buildJobSpec } from "../src/bacalhau.mjs";
+
+const job = {
+  id: "wingfoil-forecast",
+  schedule: { every: "15m" },
+  task: {
+    image: "${IMAGE}",
+    parameters: ["--models", "icon-eu"],
+    requiredEnv: ["S3_BUCKET", "AWS_SECRET_ACCESS_KEY"],
+    passEnv: ["S3_PREFIX"],
+    resources: { cpu: "2", memory: "4Gb", disk: "4Gb" },
+    network: { type: "Full" },
+  },
+};
+
+test("buildJobSpec translates a small definition and redacts inspection output", () => {
+  const environment = {
+    IMAGE: "registry.example/wingfoil@sha256:abc",
+    S3_BUCKET: "forecast",
+    AWS_SECRET_ACCESS_KEY: "secret",
+    S3_PREFIX: "prod",
+  };
+  const spec = buildJobSpec(job, environment, { redact: true });
+  assert.equal(spec.Type, "batch");
+  assert.equal(spec.Count, 1);
+  assert.equal(spec.Tasks[0].Engine.Params.Image, environment.IMAGE);
+  assert.deepEqual(spec.Tasks[0].Engine.Params.Parameters, ["--models", "icon-eu"]);
+  assert.deepEqual(spec.Tasks[0].Engine.Params.EnvironmentVariables, [
+    "S3_PREFIX=<redacted>",
+    "S3_BUCKET=<redacted>",
+    "AWS_SECRET_ACCESS_KEY=<redacted>",
+  ]);
+  assert.equal(spec.Tasks[0].Resources.Memory, "4Gb");
+  assert.throws(() => buildJobSpec(job, { IMAGE: "image", S3_BUCKET: "bucket" }), /AWS_SECRET_ACCESS_KEY/);
+});
+
+test("BacalhauClient submits a private temporary JSON spec and extracts its job ID", async () => {
+  let submitted;
+  const execute = async (binary, args) => {
+    assert.equal(binary, "bacalhau-test");
+    assert.deepEqual(args.slice(0, 2), ["job", "run"]);
+    submitted = JSON.parse(await readFile(args[2], "utf8"));
+    return { stdout: "j-1234-abcd\n", stderr: "" };
+  };
+  const client = new BacalhauClient({ binary: "bacalhau-test", execute });
+  assert.equal(await client.submit({ Name: "test" }), "j-1234-abcd");
+  assert.deepEqual(submitted, { Name: "test" });
+});
+
+test("BacalhauClient recognises terminal and active job states", async () => {
+  const outputs = [
+    JSON.stringify({ Job: { State: "Running" } }),
+    JSON.stringify({ Job: { State: "Completed" } }),
+  ];
+  const client = new BacalhauClient({ execute: async () => ({ stdout: outputs.shift(), stderr: "" }) });
+  assert.deepEqual(await client.describe("j-running").then(({ state, terminal }) => ({ state, terminal })), {
+    state: "Running",
+    terminal: false,
+  });
+  assert.deepEqual(await client.describe("j-complete").then(({ state, terminal }) => ({ state, terminal })), {
+    state: "Completed",
+    terminal: true,
+  });
+});

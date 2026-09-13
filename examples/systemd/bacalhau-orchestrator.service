@@ -1,0 +1,15 @@
+[Unit]
+Description=Bacalhau orchestrator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/home-compute/bacalhau-orchestrator.env
+ExecStart=/usr/local/bin/bacalhau serve --orchestrator -c API.Host=127.0.0.1 -c Orchestrator.Host=${TAILSCALE_IP} -c Orchestrator.Auth.Token=${BACALHAU_TOKEN} -c Orchestrator.NodeManager.ManualApproval=true -c WebUI.Enabled=true
+Restart=on-failure
+RestartSec=5
+User=bacalhau
+
+[Install]
+WantedBy=multi-user.target

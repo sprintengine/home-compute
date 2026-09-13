@@ -1,0 +1,59 @@
+{
+  "pollEvery": "30s",
+  "stateFile": "../../.home-compute/wingfoil-state.json",
+  "envFile": ".env",
+  "api": {
+    "host": "127.0.0.1",
+    "port": 4786,
+    "tokenEnv": "HOME_COMPUTE_API_TOKEN"
+  },
+  "bacalhau": {
+    "binary": "bacalhau",
+    "apiHost": "127.0.0.1",
+    "apiPort": 1234
+  },
+  "jobs": [
+    {
+      "id": "wingfoil-harmonie",
+      "schedule": { "every": "1h" },
+      "labels": { "application": "wingfoil", "model": "harmonie" },
+      "task": {
+        "image": "${WINGFOIL_IMAGE}",
+        "parameters": ["--models", "harmonie", "--step", "1"],
+        "requiredEnv": ["S3_BUCKET", "AWS_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
+        "passEnv": ["S3_PREFIX", "AWS_ENDPOINT_URL", "AWS_SESSION_TOKEN"],
+        "resources": { "cpu": "2", "memory": "4Gb", "disk": "20Gb" },
+        "network": { "type": "Full" },
+        "timeouts": { "queueSeconds": 7200, "totalSeconds": 10800 }
+      }
+    },
+    {
+      "id": "wingfoil-icon-eu",
+      "schedule": { "every": "6h" },
+      "labels": { "application": "wingfoil", "model": "icon-eu" },
+      "task": {
+        "image": "${WINGFOIL_IMAGE}",
+        "parameters": ["--models", "icon-eu", "--step", "1"],
+        "requiredEnv": ["S3_BUCKET", "AWS_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
+        "passEnv": ["S3_PREFIX", "AWS_ENDPOINT_URL", "AWS_SESSION_TOKEN"],
+        "resources": { "cpu": "2", "memory": "4Gb", "disk": "20Gb" },
+        "network": { "type": "Full" },
+        "timeouts": { "queueSeconds": 7200, "totalSeconds": 10800 }
+      }
+    },
+    {
+      "id": "wingfoil-ecmwf",
+      "schedule": { "every": "1h" },
+      "labels": { "application": "wingfoil", "model": "ecmwf" },
+      "task": {
+        "image": "${WINGFOIL_IMAGE}",
+        "parameters": ["--models", "ecmwf"],
+        "requiredEnv": ["S3_BUCKET", "AWS_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
+        "passEnv": ["S3_PREFIX", "AWS_ENDPOINT_URL", "AWS_SESSION_TOKEN", "ECMWF_SOURCE"],
+        "resources": { "cpu": "2", "memory": "4Gb", "disk": "20Gb" },
+        "network": { "type": "Full" },
+        "timeouts": { "queueSeconds": 7200, "totalSeconds": 10800 }
+      }
+    }
+  ]
+}

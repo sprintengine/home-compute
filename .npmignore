@@ -1,0 +1,8 @@
+.codex/
+.multicode/
+.env
+.home-compute/
+test/
+mockups/
+studio-module/src/
+studio-module/scripts/

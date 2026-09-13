@@ -1,0 +1,15 @@
+{
+  "name": "@home-compute/studio-module",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Sprint Engine Studio control surface for Home Compute.",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "node scripts/build.mjs --check"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.12"
+  },
+  "license": "Apache-2.0"
+}

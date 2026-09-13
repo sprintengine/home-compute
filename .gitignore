@@ -1,0 +1,7 @@
+.env
+.home-compute/
+.codex/
+.multicode/
+node_modules/
+studio-module/dist/
+npm-debug.log*

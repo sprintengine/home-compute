@@ -1,0 +1,15 @@
+[Unit]
+Description=Bacalhau home compute worker
+After=network-online.target docker.service tailscaled.service
+Wants=network-online.target docker.service tailscaled.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/home-compute/bacalhau-worker.env
+ExecStart=/usr/local/bin/bacalhau serve --compute -c Compute.Orchestrators=${BACALHAU_ORCHESTRATOR} -c Compute.Auth.Token=${BACALHAU_TOKEN} -c Compute.AllocatedCapacity.CPU=${BACALHAU_CPU} -c Compute.AllocatedCapacity.Memory=${BACALHAU_MEMORY} -c Compute.AllocatedCapacity.Disk=${BACALHAU_DISK}
+Restart=on-failure
+RestartSec=5
+User=bacalhau
+
+[Install]
+WantedBy=multi-user.target

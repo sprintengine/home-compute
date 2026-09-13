@@ -1,0 +1,19 @@
+{
+  "id": "home-compute",
+  "displayName": "Home Compute",
+  "version": 1,
+  "publisher": "sprintengine",
+  "category": "orchestration",
+  "summary": "Observe and control batch jobs running across your own machines.",
+  "defaultEnabled": true,
+  "source": "third-party",
+  "permissions": [
+    "network",
+    "ipc:invoke",
+    "storage"
+  ],
+  "entry": {
+    "main": "dist/main.cjs",
+    "renderer": "dist/renderer.mjs"
+  }
+}
