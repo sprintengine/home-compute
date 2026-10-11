@@ -182,6 +182,12 @@ test("the menu bar app's one-time link signs a browser in once", async (context)
   const jar = first.headers["set-cookie"][0].split(";")[0];
   assert.equal((await send(port, { path: "/v1/snapshot", headers: { cookie: jar } })).status, 200);
   const again = await send(port, { path: `${url.pathname}${url.search}` });
+  for (const [next, location] of [["#/job/gfs-wave", "/#/job/gfs-wave"], ["https://evil.example", "/"], ["//evil.example", "/"]]) {
+    const { json } = await send(port, { method: "POST", path: "/v1/session/link", headers: { authorization: `Bearer ${TOKEN}` } });
+    const target = new URL(json.url);
+    target.searchParams.set("next", next);
+    assert.equal((await send(port, { path: `${target.pathname}${target.search}` })).headers.location, location, next);
+  }
   assert.equal(again.headers.location, "/?signin=expired");
   assert.equal(again.headers["set-cookie"], undefined);
 });

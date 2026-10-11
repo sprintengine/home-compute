@@ -173,7 +173,10 @@ export function createApiServer({
   async function redeemLogin(request, response, url) {
     const created = auth.hostAllowed(request) ? auth.redeemLink(url.searchParams.get("code")) : undefined;
     if (created) response.setHeader("set-cookie", auth.sessionCookie(request, created.id, auth.sessionMs / 1000));
-    response.writeHead(303, { location: created ? "/" : "/?signin=expired", "cache-control": "no-store" });
+    // `next` may only name a page of the dashboard itself (a #/ route), never another site.
+    const next = url.searchParams.get("next") ?? "";
+    const page = /^#\/[A-Za-z0-9/._~%-]*$/.test(next) ? next : "";
+    response.writeHead(303, { location: created ? `/${page}` : "/?signin=expired", "cache-control": "no-store" });
     response.end();
   }
 
