@@ -8,8 +8,14 @@ import path from "node:path";
 import test from "node:test";
 import { jobFromV1, planImport, validatePreset } from "../../src/core/importer.mjs";
 import { materialise } from "../../src/core/schedule.mjs";
+import { boundedReports, reportMetrics } from "../../src/core/history.mjs";
+import { sha256Hex } from "../../src/core/protocol.mjs";
+import { redactValue } from "../../src/core/redact.mjs";
+import { publishedEntries, trackPublished } from "../../src/core/reports.mjs";
 import { verifyAccessJwt } from "../src/access.mjs";
+import { parseComplete, parseSync } from "../src/agent-body.mjs";
 import { clientRun } from "../src/snapshot.mjs";
+import { chooseClaims, redactPatterns } from "../src/sync.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "../..");
 const readJson = async (file) => JSON.parse(await readFile(path.join(ROOT, file), "utf8"));
@@ -57,6 +63,42 @@ test("the hot paths of a request cost well under the 10 ms CPU limit", async () 
   const settings = { team: "t.cloudflareaccess.com", audience: "a", issuer: "https://t.cloudflareaccess.com", certsUrl: "https://cpu.test/certs" };
   const fetcher = async () => Response.json({ keys: [{ ...jwk, kid: "k" }] });
   results.accessJwt = await cpuMs(() => verifyAccessJwt(`${unsigned}.${signature}`, settings, { fetcher }));
+
+  // The agent API's JavaScript: a busy sync (two runs, each with a full 32 KB tail, checked and redacted again),
+  // a claim decision over 20 due runs and 21 jobs, a completion (64 KB tail, 32 KB of reports), a credential hash.
+  const tail = Array.from({ length: 200 }, (_, index) => `2026-11-02T08:20:${String(index % 60).padStart(2, "0")}Z INFO step ${index} ${"x".repeat(120)}`)
+    .join("\n").slice(0, 32 * 1024);
+  const syncBody = JSON.stringify({
+    protocol: 1, agentVersion: "0.2.0", agentTime: now,
+    machine: { drain: false, vm: { kind: "colima", state: "running" }, free: { cpus: 2, memoryMiB: 4096, diskMiB: 30_000, runs: 0 }, health: { docker: "ok" } },
+    runs: ["r_01M4NY315G5RXDH30FP5J39JF1", "r_01M4NY315G5RXDH30FP5J39JF2"].map((id) => ({
+      id, phase: "running", stats: { peakMemoryBytes: 4e8, cpuPct: 90 }, logTail: { text: tail, bytesTotal: 90_000, truncated: true, errorCount: 0 },
+    })),
+    claim: true,
+  });
+  results.agentSync = await cpuMs(() => {
+    const parsed = parseSync(JSON.parse(syncBody));
+    return parsed.runs.map((run) => redactPatterns(run.logTail.text));
+  }, 100);
+  const jobMap = new Map(jobs.map((job) => [job.id, { ...job, paused: false, revision: 1 }]));
+  const due = jobs.slice(0, 20).map((job, index) => ({ id: `r_${index}`, job_id: job.id, source: "schedule", due_at: now - index * 1000,
+    preferred_until: now + 60_000, attempt: 1 }));
+  const fleet = [{ id: "m_1", name: "mac-mini", labels: { arch: "arm64" }, lastSeenAt: now, drain: false, health: { docker: "ok" } },
+    { id: "m_2", name: "linux", labels: { arch: "amd64" }, lastSeenAt: now, drain: false, health: { docker: "ok" } }];
+  results.agentClaim = await cpuMs(() => chooseClaims({ due, jobs: jobMap, machine: fleet[0], machines: fleet, globalPause: false, now,
+    free: { cpus: 4, memoryMiB: 6144, diskMiB: 40_000, runs: 2 } }));
+  const reports = Array.from({ length: 120 }, (_, index) => ({ event: "forecast_complete", model: `model-${index}`, run: "2026110200",
+    seconds: 300, frames: 120, peakRssBytes: 4e8, note: "x".repeat(150) }));
+  const completeBody = JSON.stringify({ protocol: 1, exitCode: 0, reports, logTail: { text: `${tail}\n${tail}`, bytesTotal: 900_000, truncated: true },
+    stats: { peakMemoryBytes: 4e8, samples: 100 }, durations: { durationMs: 300_000 }, image: { ref: "x", digest: "sha256:1" } });
+  const report = { format: "json-lines", trackEvent: "forecast_complete", trackBy: "model" };
+  results.agentComplete = await cpuMs(() => {
+    const record = parseComplete(JSON.parse(completeBody));
+    const kept = boundedReports(redactValue(record.reports, redactPatterns));
+    redactPatterns(record.logTail.text);
+    return [reportMetrics(kept), publishedEntries(kept, report, "ecmwf"), trackPublished({}, kept, report, { fallbackKey: "ecmwf", at: "t" })];
+  }, 100);
+  results.agentCredential = await cpuMs(() => sha256Hex(`hca_m_01M4NY315G5RXDH30FP5J39JFF_${"A".repeat(43)}`));
 
   console.log(JSON.stringify({ event: "cpu_ms_per_call", ...Object.fromEntries(Object.entries(results).map(([key, ms]) => [key, Number(ms.toFixed(3))])) }));
   for (const [name, ms] of Object.entries(results)) assert.ok(ms < 4, `${name} took ${ms} ms of CPU`);
