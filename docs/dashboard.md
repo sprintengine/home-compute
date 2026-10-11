@@ -228,3 +228,60 @@ be `Secure`.
 The menu bar app's **Open dashboard** opens `http://127.0.0.1:4786/` already
 signed in (a one-time link minted with its token), and its "Recent runs" rows
 open that run's page.
+
+## On the hosted control plane (M4)
+
+The same `dashboard/` is the hosted control plane's web app: `hc-web` serves
+it as static assets behind Cloudflare Access (see
+[cloud/README.md](../cloud/README.md#the-dashboard-m4) for how it signs in,
+polls and works offline). It notices which it is talking to: against the
+local controller it keeps the token sign-in, the event stream and the pages
+above; against `hc-web` it adds machines, the timetable grid, settings and
+the audit log. Every page is laid out for a 390-pixel phone first, with a
+tab bar at the bottom, and for a desktop with a sidebar.
+
+- **Overview.** *Needs attention* first, the critical items before the
+  warnings: a last run that failed (with its error), a run lost in the last
+  day that no later run has settled, a run waiting more than ten minutes
+  (with why: `no machine has labels gpu=yes`, `preferred mac-mini busy`), a
+  machine offline, unhealthy or whose VM failed to start (with Colima's
+  error), a clock more than 30 s off, an agent older than the desired
+  version, and jobs blocked on vault secrets (one line per reason). Then
+  *Running now* (job, machine, phase including starting the VM and pulling,
+  elapsed time, peak memory against the limit), *Next up* (the next six
+  slots, in UTC and Irish time, with the machine expected to take each), and
+  a card per job: its schedule in UTC with Irish time beside it, last
+  outcome, published model runs, and a sparkline of its last 20 runs'
+  durations (failures in red). Jobs switched off fold into one line.
+- **A job.** Run now (with optional extra arguments, quoted as in a shell),
+  Pause/Resume, Enable/Switch off; the timetable editor (hour chips, minute
+  chips, every hour, with the resulting slots previewed in UTC and Irish
+  time); placement (required labels, preferred machine, how long to wait for
+  it); resources (CPU, disk, and a memory picker with "peak 410 MiB over 20
+  runs; limit 1 GiB", warning below the peak plus 10%); the image, the digest
+  that last ran and, for an admin, "pin to the digest that last ran"; the
+  rest of the definition (arguments, environment and secret names, timeout,
+  policy, reports, revision); and the run history (time, machine, queue
+  wait, duration, peak memory, outcome, error), loaded as it scrolls.
+- **A run.** Its phases (due, claimed, VM, pull, run, report, finished) with
+  the time each began and how long it took (the agent's own measurements for
+  VM wait, pull and run), stats (peak memory, the workload's own peak when it
+  reports one, CPU, samples, exit code, image digest), reports, the error
+  with its traceback, the log tail with errors highlighted, errors only and a
+  jump to the first; Cancel (with a confirmation) or Retry.
+- **Machines.** Status (online, offline, draining, unhealthy), the VM (state,
+  size, up since), current runs, caps, labels, agent version, last seen and
+  clock skew; Drain/Undrain. A machine's page adds the VM's boot time and
+  uptime over the last day, free capacity, OS and runtime, last IP,
+  credential age, a 24-hour timeline of its VM and runs, and its runs; an
+  admin can edit its name, labels and caps, and revoke it after typing its
+  name. **Add machine** makes a join token, shows it once with the install
+  and enrol commands for macOS and Linux (agent/README.md, "Install by
+  hand"), and forgets it when the page is left; installing over SSH is M6.
+- **Timetable.** Every job on a 24-hour UTC grid with the Irish hour under
+  each column (a list by hour on a phone), hourly and interval jobs on a
+  line each, switched-off jobs folded.
+- **Settings and audit.** The global pause (operators), retention, the
+  agent version machines should run and roles (admins), who you are and
+  Access's sign-out; the audit log, newest first, loaded as it scrolls.
+  Secrets get their page with the vault (M5).

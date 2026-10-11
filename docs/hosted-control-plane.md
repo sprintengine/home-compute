@@ -263,6 +263,10 @@ Notes:
   written at most once a **minute**, not every 5 minutes, because §3.5's offline test needs it
   fresh (see §3.5). `settings.machines_version` moves on dashboard machine edits, so
   `/v1/changes` notices a drain.
+- *As built (M4):* migration `0004` adds `runs_by_machine_claimed ON runs(machine_id, claimed_at)`
+  for a machine's 24-hour timeline. A machine's VM history lives in `facts_json` (`vmSince`,
+  `vmHistory`: the last day's running spans), and `settings.desired_agent_version` says which
+  agent machines should run (until M7's channel).
 
 ---
 
@@ -824,6 +828,23 @@ Live updates: the visible page polls `GET /v1/changes?since=<cursor>` every 10 s
 an empty body when nothing changed (cursor = `max(runs.updated_at, jobs_version, machines change)`),
 and fetches the snapshot only when something did. Polling stops while the page is hidden. Push is a later option (§12).
 
+*As built (M4):* the pages above except Provisioning (M6) and Secrets (M5, shown once the API
+lists `secrets` among its features); Add machine makes join tokens, shown once with copy-paste
+install and enrol commands (agent/README.md, "Install by hand") that read the token at a prompt,
+never from argv. Navigation is a bottom tab bar on phones and a sidebar on desktops. The
+dashboard stays plain ES modules with no build step, served by hc-web (and, until M7, by the
+local controller, which it still supports); `sw.js` caches its files network-first for offline
+use and never the API. Beyond §7's list: `PATCH /v1/jobs/:id/placement` and `/resources` are
+operator, `/image` admin; `GET /v1/machines/:id/runs?since=` feeds the machine timeline; job
+history takes `skipped=0`; the snapshot adds (never changes) per-job `placement` and `durations`
+(20 finished runs, read with a narrow query of its own), `upcoming` (next six slots with the
+expected machine, from the same placement rules hc-core claims by, without capacity),
+`lostRuns`, `desiredAgentVersion`, and per machine `vmSince`, `vmHistory` and
+`updateAvailable`. "Agents needing an update" compares against `settings.desiredAgentVersion`,
+else the newest version any enrolled machine runs. Schedules show UTC with Irish time
+(`Europe/Dublin`) beside them, omitted when the two agree. The workload's own `peak*` memory is
+preferred over the sampled peak wherever both exist (§4.6).
+
 ### Human API (`hc-web`, Access + CSRF; paths compatible with today's local controller)
 
 ```text
@@ -971,7 +992,7 @@ assistance, in focused days.
 | M1 | **Control plane skeleton** | `cloud/` workspace: `wrangler.web.jsonc` + `wrangler.core.jsonc`, `migrations/0001_init.sql`, cron materialisation, job CRUD, `/v1/snapshot`, `cloud import` (dry-run diff), deployed in **shadow mode** | `@cloudflare/vitest-pool-workers` (workerd + local D1, migrations applied): cron twice in one minute → one run; coalescing; pause; import idempotency; Access JWT checks against a test JWKS; CSRF refusals | 5 d |
 | M2 | **Agent MVP (fake runtime)** | Enrol, sync, claim, leases, lost/retry, complete, outbox, adopt-on-restart | Integration in `node --test`: Miniflare/`unstable_dev` hosting `hc-core` + agent with `FakeRuntime` and a fake clock. Two agents race for one run → one winner; agent killed mid-run → `lost` → retry; late complete → `recovered`; offline control plane → outbox drains later. *Built: `cloud/test-node/agent-integration.test.mjs` (Miniflare, a clock both sides share).* | 5 d |
 | M3 | **Docker + Colima runtime** | `DockerCliRuntime`, `ColimaRuntime` (pre-warm, size, idle stop), stats, OOM/timeout, redaction, policy (`allowImages`) | CI (ubuntu-latest has Docker): a fixture image that prints json-lines, echoes a secret (must be `<redacted>` server-side), allocates 300 MB (peak ≥ 300 MB), OOMs at `--memory 64m`, sleeps past `runSeconds`. Colima: unit tests against a fake `colima` binary (the `macos/dev/fake-setup.sh` pattern) for start/resize/stop decisions; a manual acceptance script on the Mac mini (GitHub's macOS runners cannot run nested VMs). *Built: fake `docker`/`colima`/`caffeinate` binaries on PATH (`agent/test/fake-bin/`) with a fake Engine on a unix socket; `agent/test/docker-real.test.mjs` and `cloud/test-node/docker-integration.test.mjs` on real Docker (CI requires them; on a Mac they run in a throwaway profile via `agent/scripts/with-test-colima.sh`); `agent/scripts/acceptance-colima.sh`.* | 6 d |
-| M4 | **Hosted dashboard** | Port `feature/dashboard` app to `hc-web` assets; Access sign-in; Machines, Timetable grid, run detail with phases/stats; `/v1/changes` polling | Existing `test/dashboard.test.mjs` approach against the Worker; Playwright smoke at a 390×844 viewport (overview, run now, timetable edit) | 4 d |
+| M4 | **Hosted dashboard** | Port `feature/dashboard` app to `hc-web` assets; Access sign-in; Machines, Timetable grid, run detail with phases/stats; `/v1/changes` polling | Existing `test/dashboard.test.mjs` approach against the Worker; Playwright smoke at a 390×844 viewport (overview, run now, timetable edit) *Built: `test/dashboard-lib.test.mjs` (the page logic in Node), `cloud/test/dashboard-api.test.mjs` (workerd), and `cloud/test-node/dashboard-browser.test.mjs`: Chromium through `playwright-core` at 390×844 and 1440×900 against both Workers under `wrangler dev`, seeded with Wingfoil's timetable, a FakeRuntime agent and runs in several states; `cloud/scripts/dashboard-screenshots.mjs` shoots every page.* | 4 d |
 | M5 | **Secrets + Wingfoil cut-over** | Vault (RSA-OAEP envelope, split keys), Wingfoil preset, `import-history`, migration phases 1–4 | Worker tests: no `/v1` response contains a secret value (grep every endpoint's body); claims to non-matching labels get no secrets. Migration checklist per job | 3 d + 1–2 wk soak |
 | M6 | **Provisioning (Linux, then macOS)** | Provisioner capability, `install.sh`, task UI, uninstall | `shellcheck`; `install.sh --dry-run` with stubbed `apt`/`systemctl`/`brew` asserting step order and second-run `skip`; real run against a tailnet Linux VM and a spare Mac (checklist) | 5 d |
 | M7 | **Self-update, clients, Bacalhau removal** | Signed releases (ed25519), launcher rollback, menu bar app retarget, Studio retarget, phase 6 decommission | Update test: signed v+1 applies only when idle; bad signature refused; crash-looping update rolls back. `swift test` for the app with the fake controller updated to the hosted shape | 4 d |

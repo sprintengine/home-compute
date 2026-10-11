@@ -2,7 +2,7 @@
 
 This workspace is the control plane of
 [docs/hosted-control-plane.md](../docs/hosted-control-plane.md), milestones M0
-to M2: two Workers from one codebase and one D1 database. The agent that
+to M4: two Workers from one codebase and one D1 database. The agent that
 talks to `hc-core` is in [../agent](../agent/README.md).
 
 | Worker | Config | What it does |
@@ -63,6 +63,19 @@ curl -s -X POST localhost:8787/v1/jobs/hello/run -H 'content-type: application/j
 The agent claims the run on its next sync (at most 30 s while idle) and
 `GET /v1/snapshot` shows the machine, the run and its result.
 
+To see the dashboard with something on every page, start both Workers with a
+seeded local D1 (Wingfoil's timetable, demo jobs, a FakeRuntime agent, a
+failed, a lost and a waiting run, an offline machine and one whose VM
+failed):
+
+```sh
+node scripts/dashboard-screenshots.mjs --serve   # prints the URL; Ctrl-C stops it and deletes the state
+node scripts/dashboard-screenshots.mjs /tmp/hc-m4  # or: every page at 390×844 and 1440×900, as PNGs
+```
+
+Both need Playwright's Chromium for screenshots (`npx playwright-core install
+chromium`); `--serve` does not.
+
 ## Tests
 
 ```sh
@@ -99,6 +112,20 @@ npm test --workspace @home-compute/cloud
   e.g. through `agent/scripts/with-test-colima.sh`). CI requires it.
 - `test-node/local-worker.test.mjs` runs hc-web under `wrangler dev` and drives
   it with `home-compute cloud import`, as above.
+- `test/dashboard-api.test.mjs` covers what the dashboard added (M4): job
+  parts (placement, resources, image) with their roles, audit and CSRF; a
+  machine's day of runs and VM spans; agents behind the desired version; the
+  snapshot's next slots, sparklines and lost runs.
+- `test-node/dashboard-browser.test.mjs` (M4) runs the dashboard in Chromium
+  (`playwright-core`) at 390×844 and 1440×900 against both Workers under
+  `wrangler dev`, seeded by `test-node/support/dashboard-seed.mjs`: the
+  overview's attention list, a change made elsewhere appearing through
+  `/v1/changes` (and no polling while hidden), Run now with arguments, a
+  timetable edit that persists, drain and revoke, a join token shown once,
+  the CSRF refusal, a viewer who sees no controls and is refused anyway, the
+  log's errors-only filter, and DEV_ACCESS_EMAIL. It is skipped without
+  Playwright's Chromium unless `HC_REQUIRE_BROWSER_TESTS=1` (CI sets it and
+  installs Chromium).
 - `test-node/cpu.test.mjs` estimates CPU per request on the hot paths.
 
 ## API
@@ -116,17 +143,20 @@ dashboard's `X-CSRF-Token`) from `GET /v1/session`.
 | `GET /v1/jobs/:id` | viewer | Definition, `paused`, `revision` (also the ETag). |
 | `PUT /v1/jobs/:id` | admin | Create (no If-Match) or replace (`If-Match: <revision>`; 428 without, 412 when stale). |
 | `PATCH /v1/jobs/:id/timetable` | operator | `{enabled?, hours?: [..] \| "every", minutes?}`. `POST` works too, as today's clients send it. |
+| `PATCH /v1/jobs/:id/placement` \| `/resources` | operator | `{requireLabels?, preferMachines?, preferWaitSeconds?}` (null removes a field) \| `{cpus?, memoryMiB?, diskMiB?}`. Checked by the job's own rules, audited, a new revision; If-Match honoured when sent. |
+| `PATCH /v1/jobs/:id/image` | admin | `{image}`: what runs is an admin's choice (the dashboard's "pin to the digest that last ran"). |
 | `POST /v1/jobs/:id/run` \| `/pause` \| `/resume` | operator | Run now: `{extraParameters?, force?}`. |
-| `GET /v1/jobs/:id/runs?before=&limit=` | viewer | Newest first, skipped slots included. |
+| `GET /v1/jobs/:id/runs?before=&limit=&skipped=0` | viewer | Newest first, skipped slots included unless `skipped=0`. |
 | `GET /v1/runs/:id`, `/v1/runs/:id/logs` | viewer | The log is the agent's redacted tail: up to 200 lines while running, 500 at the end. |
 | `POST /v1/runs/:id/cancel` | operator | A waiting or active run; its agent stops it on its next sync. |
 | `POST /v1/runs/:id/retry` | operator | A finished or lost run again: `attempt + 1`, `retry_of`. `{force?}` as Run now. |
-| `GET /v1/machines?all=1`, `/v1/machines/:id` | viewer | Status (online, offline, draining, unhealthy, revoked), VM, free capacity, caps, labels, agent, clock skew, current runs. `all` adds revoked ones. |
+| `GET /v1/machines?all=1`, `/v1/machines/:id` | viewer | Status (online, offline, draining, unhealthy, revoked), VM (with `vmSince` and the last day's `vmHistory` spans), free capacity, caps, labels, agent (`updateAvailable` when older than the desired version), clock skew, current runs. `all` adds revoked ones. |
+| `GET /v1/machines/:id/runs?since=` | viewer | What it ran from `since` (default 24 hours ago), newest first. |
 | `PATCH /v1/machines/:id` | operator / admin | `{drain}` for an operator; `{name, labels, capacity, capabilities, rotateCredential: true}` need an admin. |
 | `DELETE /v1/machines/:id` | admin | Revokes it: its next request gets 401. |
-| `POST /v1/join-tokens` | admin | `{name?, labels?, capabilities?, ttlMinutes?}` → `{token, expiresAt, enrolCommand}`, shown once. |
+| `POST /v1/join-tokens` | admin | `{name?, labels?, capabilities?, ttlMinutes?}` → `{token, expiresAt, server, enrolCommand}`, shown once. |
 | `POST /v1/pause-all` \| `/v1/resume-all` | operator | The global pause. |
-| `GET` \| `PATCH /v1/settings` | admin | `globalPause`, `retention`, `roles`. |
+| `GET` \| `PATCH /v1/settings` | admin | `globalPause`, `retention`, `roles`, `desiredAgentVersion` (null: the newest any enrolled machine runs). |
 | `POST /v1/import?dryRun=1` | admin | `{config: {jobs}, preset, variables, force?, pause?}` → per-job diff. |
 | `GET /v1/audit?before=&limit=` | admin | Every mutation with before/after. |
 
@@ -265,6 +295,42 @@ A 401 says `{"code": "revoked"}` for a revoked machine and
 - **Cancels.** A run the dashboard cancelled, or the cron timed out, is in
   the `cancel` list of its machine's next sync; the agent's completion then
   only adds its final log.
+
+### The dashboard (M4)
+
+The dashboard in `../dashboard` is hc-web's static assets: plain ES modules,
+no build step, nothing from another origin (the CSP allows only `'self'`).
+`lib.js` holds what can be tested without a browser; `app.js` boots it, and
+there is a module per page. See [docs/dashboard.md](../docs/dashboard.md)
+for what each page shows.
+
+- **Sign-in.** Access signs people in; the page asks `GET /v1/session` for
+  the login, role and CSRF token, and sends the token (`X-HC-CSRF`) with
+  every change. A viewer sees no controls (the API refuses anyway); a login
+  Access let in but with no role is told so. Under `wrangler dev`,
+  `DEV_ACCESS_EMAIL` stands in on loopback hosts only.
+- **Live updates.** While visible, `GET /v1/changes?since=` every 10 s (204
+  while nothing moved); a moved cursor reloads the snapshot and the open
+  page's data (its job, history, run and log, machine timeline). Hidden, it
+  stops; visible again, it asks at once. An idle dashboard costs one request
+  and three indexed reads per 10 s.
+- **Snapshot additions** (fields only added, so the menu bar app and Studio
+  module are unaffected): per job `placement` and `durations` (the last 20
+  finished runs, read with a narrow query of their own; `recentRuns` keeps
+  its 5); `upcoming` (the next six slots across jobs, each with the machine
+  expected to take it or why none can), `lostRuns` (the last day's),
+  `desiredAgentVersion`, and per machine `vmSince`, `vmHistory` and
+  `updateAvailable`. The snapshot is now one batch of nine indexed reads.
+- **VM uptime.** hc-core stamps `vmSince` when a sync reports a new VM state
+  and keeps the running spans of the last 24 hours (at most 48) in the
+  machine's facts. A change of state already writes the row, so this adds
+  no writes; the times are the server's receipt times (within a sync).
+- **Offline.** `sw.js` caches the dashboard's own files, network first, so
+  the shell opens offline and a release never mixes old and new modules. It
+  never caches `/v1/*` or Access's `/cdn-cgi/*`, nor any redirect.
+- **Migration `0004`** indexes runs by `(machine_id, claimed_at)` for a
+  machine's day of runs; without it that read scans every run the machine
+  ever held.
 
 ### Measured cost (2026-10-11)
 
