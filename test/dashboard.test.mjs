@@ -196,6 +196,8 @@ test("without a token, only direct local requests are let in", async (context) =
   const { port } = await fixture(context, { token: null });
   assert.equal((await send(port, { path: "/v1/snapshot" })).status, 200, "as before tokens: a local script");
   assert.equal((await send(port, { method: "POST", path: "/v1/jobs/harmonie/pause", body: {} })).status, 202);
+  assert.equal((await send(port, { path: "/v1/snapshot", headers: { authorization: "Bearer stale" } })).status, 200,
+    "an app still sending an old token is not turned away");
   assert.equal((await send(port, { path: "/v1/snapshot", headers: { host: TAILNET, "x-forwarded-for": "100.1.2.3" } })).status, 401,
     "a tailnet request through tailscale serve is not local");
   assert.equal((await send(port, { path: "/v1/snapshot", headers: { host: "evil.example.com" } })).status, 401, "DNS rebinding");

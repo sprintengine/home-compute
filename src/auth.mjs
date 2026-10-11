@@ -117,8 +117,9 @@ export class DashboardAuth {
   /** The request's identity, or undefined. A wrong bearer token is never passed over for another method. */
   authenticate(request) {
     const authorization = header(request, "authorization");
-    if (authorization !== undefined) {
-      return this.token && equal(authorization, `Bearer ${this.token}`) ? { method: "token" } : undefined;
+    // Without a configured token a client's Authorization header means nothing, as before.
+    if (authorization !== undefined && this.token) {
+      return equal(authorization, `Bearer ${this.token}`) ? { method: "token" } : undefined;
     }
     if (this.hostAllowed(request)) {
       const login = this.tailscaleLogin(request);
