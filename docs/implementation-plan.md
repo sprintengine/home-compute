@@ -1,5 +1,7 @@
 # Implementation plan
 
+> Successor design: [hosted control plane and pull-based agent](hosted-control-plane.md) replaces the Bacalhau architecture described here.
+
 Home Compute is a generic, self-hosted control layer for recurring container
 jobs. Bacalhau supplies the distributed systems substrate; Home Compute supplies
 the smaller operator experience that a home or small-team fleet needs.
