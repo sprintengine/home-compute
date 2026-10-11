@@ -458,7 +458,8 @@ function render() {
   main.replaceChildren(view);
   window.scrollTo(0, scroll);
   const log = main.querySelector(".log");
-  if (log && logScroll !== undefined) log.scrollTop = logScroll;
+  // A log opens at its end, the part a tail is for; later renders keep the reader's place.
+  if (log) log.scrollTop = logScroll ?? log.scrollHeight;
   if (focused) document.getElementById(focused)?.focus();
 }
 
