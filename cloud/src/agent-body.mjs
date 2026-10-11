@@ -140,6 +140,7 @@ export function parseComplete(body) {
     oomKilled: flag(input.oomKilled, "oomKilled"),
     timedOut: flag(input.timedOut, "timedOut"),
     cancelled: flag(input.cancelled, "cancelled"),
+    failed: flag(input.failed, "failed"),
     error: text(input.error, "error", 500),
     errorDetail: text(input.errorDetail, "errorDetail", MAX_ERROR_DETAIL),
     reports,

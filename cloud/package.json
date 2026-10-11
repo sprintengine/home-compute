@@ -13,6 +13,8 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.4.0",
+    "esbuild": "^0.25.12",
+    "miniflare": "5.20261006.1-alpha",
     "vitest": "^5.0.3",
     "wrangler": "^4.149.0"
   },

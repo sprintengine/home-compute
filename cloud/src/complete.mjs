@@ -49,7 +49,8 @@ function settle(db, run, job, published, record, now) {
   const errorDetail = record.errorDetail ? redactPatterns(record.errorDetail) : null;
   const event = record.cancelled && ACTIVE.has(run.state)
     ? { type: "cancel", at: now }
-    : { type: "complete", exitCode: record.exitCode, oomKilled: record.oomKilled, timedOut: record.timedOut, reports, report: job?.report, error, at: now };
+    : { type: "complete", exitCode: record.exitCode, oomKilled: record.oomKilled, timedOut: record.timedOut, failed: record.failed,
+      reports, report: job?.report, error, at: now };
   const next = transition({ state: run.state, error: null, recovered: run.recovered === 1 }, event);
   const outcome = next.state === "cancelled" ? null : next.outcome;
   const { stats, durations } = record;

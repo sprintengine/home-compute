@@ -44,8 +44,9 @@ export function isTerminal(state) {
 }
 
 /** The state and outcome a finished run's facts give it. */
-function settle({ exitCode, oomKilled, timedOut, reports = [], report, error }) {
-  const outcome = runOutcome({ exitCode, oomKilled, timedOut, reports, report });
+function settle({ exitCode, oomKilled, timedOut, reports = [], report, error, failed = false }) {
+  // `failed`: the run never got as far as an exit code (its image was refused or would not pull, say).
+  const outcome = failed ? "failed" : runOutcome({ exitCode, oomKilled, timedOut, reports, report });
   let message = error ?? null;
   if (outcome === "failed" && !message) {
     message = reportedError(reports)
@@ -63,8 +64,9 @@ function settle({ exitCode, oomKilled, timedOut, reports = [], report, error }) 
  *   start; a cached image needs no pull). Repeating the current phase is a
  *   heartbeat and changes nothing.
  * - `{type: "renew", leaseExpiresAt}`: extends an active run's lease.
- * - `{type: "complete", exitCode, oomKilled, timedOut, reports, report, error, at}`:
+ * - `{type: "complete", exitCode, oomKilled, timedOut, reports, report, error, failed, at}`:
  *   active → succeeded | failed | timed-out; lost → the same with `recovered`.
+ *   `failed` marks a run that failed before it had an exit code.
  * - `{type: "timeout", at}`: the server's backstop for a started run → timed-out.
  * - `{type: "expire", at}`: its lease ran out while claimed…reporting → lost.
  * - `{type: "skip", reason, at}`: a due run that will not run (expired, say) → skipped.

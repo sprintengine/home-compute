@@ -5,3 +5,4 @@
 node_modules/
 studio-module/dist/
 npm-debug.log*
+agent/dist/

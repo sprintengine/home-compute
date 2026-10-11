@@ -80,6 +80,9 @@ test("completion settles the state and the outcome from the facts", () => {
   assert.deepEqual([unchanged.state, unchanged.outcome], ["succeeded", "unchanged"], "ran, nothing new");
   const exited = transition(running, { type: "complete", exitCode: 2, reports: [] });
   assert.deepEqual([exited.state, exited.outcome, exited.error], ["failed", "failed", "exited with 2"]);
+  const refused = transition(running, { type: "complete", exitCode: null, failed: true, error: "pull failed: manifest unknown" });
+  assert.deepEqual([refused.state, refused.outcome, refused.error], ["failed", "failed", "pull failed: manifest unknown"],
+    "a run that failed before it had an exit code");
   const reported = transition(running, { type: "complete", exitCode: 0, reports: [{ event: "forecast_failed", error: "HTTP 503" }] });
   assert.deepEqual([reported.state, reported.error], ["failed", "HTTP 503"], "a *_failed report fails a zero exit");
   const oom = transition(running, { type: "complete", exitCode: 137, oomKilled: true });
