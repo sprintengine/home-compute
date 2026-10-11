@@ -43,6 +43,83 @@ hca status --state-dir /tmp/hc-agent      # from another terminal
 [scripts/acceptance-colima.sh](scripts/acceptance-colima.sh) does all of this
 end to end on a Mac (see Tests).
 
+## Install by hand
+
+Until the installer and remote provisioning arrive (M6), a machine is added
+by hand: an admin makes a join token on the dashboard (Machines › Add
+machine), which shows it once together with these commands, filled in with
+hc-core's URL. The token is never part of a command: the enrol step asks
+for it without echo and hands it to the agent on stdin, so it is in no
+command line and no shell history. Paste the enrol line on its own, or the
+prompt would read the next pasted line as the token. The paths are the ones
+the service templates expect (`/opt/home-compute/…` on Linux, the state
+directory on macOS); the system's own Node is linked there, where M6 will
+put a pinned one. `--allow-images` lists what this machine may run; change
+it to your own registry.
+
+### macOS
+
+1. Install:
+
+   ```sh
+   # Needs Homebrew, Node 22+ and git.
+   brew install colima docker
+   git clone https://github.com/sprintengine/home-compute.git ~/home-compute
+   cd ~/home-compute && npm ci && npm run build:agent
+   mkdir -p "$HOME/Library/Application Support/home-compute/agent/current" "$HOME/Library/Application Support/home-compute/node/bin" ~/Library/Logs/home-compute
+   cp agent/dist/home-compute-agent.mjs "$HOME/Library/Application Support/home-compute/agent/current/"
+   ln -sf "$(command -v node)" "$HOME/Library/Application Support/home-compute/node/bin/node"
+   ```
+
+2. Enrol: paste this line on its own, then the token when asked:
+
+   ```sh
+   printf 'Join token: '; read -rs HC_JOIN_TOKEN; echo; printf '%s' "$HC_JOIN_TOKEN" | "$HOME/Library/Application Support/home-compute/node/bin/node" "$HOME/Library/Application Support/home-compute/agent/current/home-compute-agent.mjs" enrol --server https://hc-core.<account>.workers.dev --join-token-stdin --runtime colima --allow-images 'ghcr.io/sprintengine/*'; unset HC_JOIN_TOKEN
+   ```
+
+3. Check, then start the service:
+
+   ```sh
+   "$HOME/Library/Application Support/home-compute/node/bin/node" "$HOME/Library/Application Support/home-compute/agent/current/home-compute-agent.mjs" doctor --start-vm
+   cd ~/home-compute && sed "s|@HOME@|$HOME|g" agent/service/dev.homecompute.agent.plist > ~/Library/LaunchAgents/dev.homecompute.agent.plist
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.homecompute.agent.plist
+   ```
+
+### Linux (systemd)
+
+1. Install:
+
+   ```sh
+   # Needs Docker Engine, git, sudo and Node 22+ installed for every user (not through nvm).
+   git clone https://github.com/sprintengine/home-compute.git ~/home-compute
+   cd ~/home-compute && npm ci && npm run build:agent
+   sudo install -d /opt/home-compute/agent/current /opt/home-compute/node/bin
+   sudo install -m 0644 agent/dist/home-compute-agent.mjs /opt/home-compute/agent/current/
+   sudo ln -sf "$(command -v node)" /opt/home-compute/node/bin/node
+   sudo useradd --system --home-dir /etc/home-compute --shell /usr/sbin/nologin hcagent && sudo usermod -aG docker hcagent
+   sudo install -d -m 0700 -o hcagent -g hcagent /etc/home-compute
+   ```
+
+2. Enrol: paste this line on its own, then the token when asked:
+
+   ```sh
+   printf 'Join token: '; read -rs HC_JOIN_TOKEN; echo; printf '%s' "$HC_JOIN_TOKEN" | sudo -u hcagent /opt/home-compute/node/bin/node /opt/home-compute/agent/current/home-compute-agent.mjs enrol --state-dir /etc/home-compute --server https://hc-core.<account>.workers.dev --join-token-stdin --runtime docker --allow-images 'ghcr.io/sprintengine/*'; unset HC_JOIN_TOKEN
+   ```
+
+3. Check, then start the service:
+
+   ```sh
+   sudo -u hcagent /opt/home-compute/node/bin/node /opt/home-compute/agent/current/home-compute-agent.mjs doctor --state-dir /etc/home-compute
+   sudo -u hcagent /opt/home-compute/node/bin/node -e 'const fs=require("fs"),f="/etc/home-compute/config.json",c=JSON.parse(fs.readFileSync(f,"utf8"));c.docker={...c.docker,cgroupParent:"home-compute.slice"};fs.writeFileSync(f,JSON.stringify(c,null,2)+"\n")'
+   cd ~/home-compute && sudo cp agent/service/home-compute-agent.service agent/service/home-compute.slice /etc/systemd/system/
+   sudo sed -i "s/@MEMORY_MAX@/6G/" /etc/systemd/system/home-compute.slice   # the most the jobs may use together
+   sudo systemctl daemon-reload && sudo systemctl enable --now home-compute-agent
+   ```
+
+The machine appears on the dashboard after its first sync (within 30
+seconds). The dashboard's commands come from `installCommands()` in
+`dashboard/lib.js`; `test/dashboard-lib.test.mjs` keeps them honest.
+
 ## Commands
 
 | Command | What it does |

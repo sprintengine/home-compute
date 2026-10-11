@@ -2,6 +2,8 @@
 // time beside them, what needs attention, the timetable grid, sparklines,
 // phases, VM uptime, forms and the install commands a join token comes with.
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
 import test from "node:test";
 import {
   attentionItems, bothClocks, installCommands, localScheduleText, memoryHint, parseArgs, parseLabels, parseRoute, peakMiB, phaseSteps,
@@ -164,6 +166,15 @@ test("install commands never carry the token and enrol from stdin, one step on i
   assert.match(commands.linux[1].text, /sudo -u hcagent .* --state-dir \/etc\/home-compute/);
   assert.match(commands.linux[2].text, /systemctl enable --now home-compute-agent/);
   assert.match(installCommands(null).linux[1].text, /--server <hc-core URL>/);
+});
+
+test("agent/README.md's install by hand is what the dashboard shows", async () => {
+  const readme = await readFile(path.resolve(import.meta.dirname, "../agent/README.md"), "utf8");
+  const commands = installCommands("https://hc-core.<account>.workers.dev");
+  for (const step of [...commands.macos, ...commands.linux]) {
+    const indented = step.text.split("\n").map((line) => `   ${line}`).join("\n");
+    assert.ok(readme.includes(indented), `the README has: ${step.title}`);
+  }
 });
 
 test("routes, old run links included", () => {

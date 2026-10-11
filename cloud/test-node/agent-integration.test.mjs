@@ -38,7 +38,8 @@ async function setup(t) {
     for (const agent of agents) agent.kill();
     timings.push(...plane.timings);
     await plane.close();
-    await rm(directory, { recursive: true, force: true });
+    // A killed agent's supervisor may still be writing a run record: retry rather than fail on ENOTEMPTY.
+    await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   /** An enrolled agent called `name`, started (adoption, outbox) but not looping: tests call syncOnce(). */
