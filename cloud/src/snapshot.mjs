@@ -20,9 +20,9 @@ const CLIENT_STATE = {
 };
 // Everything but the big columns: lists never read reports or log tails.
 export const RUN_LIST_COLUMNS = `id, job_id, job_revision, slot_at, source, state, skip_reason, outcome, attempt, retry_of, due_at,
-  preferred_until, machine_id, claimed_at, started_at, finished_at, queue_ms, duration_ms, vm_wait_ms, pull_ms, exit_code,
-  oom_killed, timed_out, peak_memory_bytes, memory_limit_bytes, avg_cpu_pct, peak_cpu_pct, cpu_seconds, image_digest,
-  parameters_json, error, metrics_json, published_json, recovered, requested_by, created_at, updated_at`;
+  preferred_until, machine_id, claimed_at, vm_started_at, pull_started_at, started_at, reporting_at, finished_at, queue_ms, duration_ms,
+  vm_wait_ms, pull_ms, exit_code, oom_killed, timed_out, peak_memory_bytes, memory_limit_bytes, avg_cpu_pct, peak_cpu_pct, cpu_seconds,
+  stats_samples, image_digest, parameters_json, error, metrics_json, published_json, recovered, requested_by, created_at, updated_at`;
 
 function seconds(ms) {
   return ms === null || ms === undefined ? undefined : Math.round(ms / 100) / 10;
@@ -48,10 +48,15 @@ export function clientRun(row, machineNames = null) {
     submittedAt: iso(run.dueAt),
     slotAt: iso(run.slotAt) ?? undefined,
     claimedAt: iso(run.claimedAt) ?? undefined,
+    vmStartedAt: iso(run.vmStartedAt) ?? undefined,
+    pullStartedAt: iso(run.pullStartedAt) ?? undefined,
     startedAt: iso(run.startedAt) ?? undefined,
+    reportingAt: iso(run.reportingAt) ?? undefined,
     finishedAt: iso(run.finishedAt) ?? undefined,
     queueSeconds: seconds(run.queueMs ?? between(run.dueAt, run.startedAt)),
     durationSeconds: seconds(run.durationMs ?? between(run.startedAt, run.finishedAt)),
+    vmWaitSeconds: seconds(run.vmWaitMs),
+    pullSeconds: seconds(run.pullMs),
     outcome: run.outcome ?? undefined,
     exitCode: run.exitCode ?? undefined,
     error: run.error ?? undefined,
@@ -64,6 +69,13 @@ export function clientRun(row, machineNames = null) {
     published: run.published ?? undefined,
     reports: run.reports ?? undefined,
     imageDigest: run.imageDigest ?? undefined,
+    // The agent's measurements (§4.6): stats_samples 0 means the run was too short to sample.
+    stats: run.statsSamples !== null && run.statsSamples !== undefined ? {
+      samples: run.statsSamples, peakMemoryBytes: run.peakMemoryBytes, memoryLimitBytes: run.memoryLimitBytes,
+      avgCpuPct: run.avgCpuPct, peakCpuPct: run.peakCpuPct, cpuSeconds: run.cpuSeconds,
+    } : undefined,
+    oomKilled: run.oomKilled || undefined,
+    timedOut: run.timedOut || undefined,
     recovered: run.recovered || undefined,
     requestedBy: run.requestedBy ?? undefined,
   };

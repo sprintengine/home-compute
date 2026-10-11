@@ -141,6 +141,21 @@ export function chooseClaims({ due, jobs, machine, machines, free, globalPause, 
   return { chosen, events };
 }
 
+/**
+ * The jobs whose runs this machine could take, whatever its free capacity:
+ * `any` for every run, `manual` for manual runs only (which ignore pauses).
+ */
+function possibleJobs(jobs, machine, globalPause) {
+  const any = [];
+  const manual = [];
+  for (const job of jobs.values()) {
+    if (claimBlockers(job).length || !labelsMatch(job.placement?.requireLabels, machine.labels)) continue;
+    manual.push(job.id);
+    if (job.enabled && !job.paused && !globalPause) any.push(job.id);
+  }
+  return { any, manual };
+}
+
 /** The machine's row after this sync, as a statement, or null when nothing worth writing changed. */
 function machineStatement(db, row, request, { now, ip, rotation }) {
   // Free disk moves all the time; storing it would write the row on every sync.
@@ -211,7 +226,9 @@ export async function sync(db, request, { machine: row, rotated, now, ip }) {
   // 3. Claims.
   let claimable = [];
   const events = [];
-  const free = effectiveFree(request.machine.free, machine.capacity, holding.map((run) => jobs.get(run.job_id)?.resources ?? {}));
+  let free = effectiveFree(request.machine.free, machine.capacity, holding.map((run) => jobs.get(run.job_id)?.resources ?? {}));
+  // A run sent again is not in what the agent counts as taken yet.
+  for (const run of resend) free = subtract(free, jobs.get(run.job_id)?.resources ?? {});
   const mayClaim = request.claim && !machine.drain && !request.machine.drain && unhealthyReason(request.machine.health) === null && fits({}, free);
   if (mayClaim) {
     let due = dueRows;
@@ -221,7 +238,16 @@ export async function sync(db, request, { machine: row, rotated, now, ip }) {
       const materialised = await materialiseAll(db, now, { jobIds: dueJobs });
       if (materialised.created) due = (await dueRunsQuery(db, now).all()).results;
     }
-    const choice = chooseClaims({ due, jobs, machine, machines, free, globalPause, now });
+    let choice = chooseClaims({ due, jobs, machine, machines, free, globalPause, now });
+    if (!choice.chosen.length && due.length === CLAIM_SCAN) {
+      // The oldest 20 were all for others (blocked, paused, wrong labels): look again among the jobs this machine could take.
+      const possible = possibleJobs(jobs, machine, globalPause);
+      due = (await db.prepare(`SELECT ${RUN_COLUMNS} FROM runs r WHERE r.state = 'due' AND r.due_at <= ?1
+          AND (r.job_id IN (SELECT value FROM json_each(?2)) OR (r.source = 'manual' AND r.job_id IN (SELECT value FROM json_each(?3))))
+          AND NOT EXISTS (SELECT 1 FROM runs a WHERE a.job_id = r.job_id AND a.state IN (${ACTIVE_SQL}))
+        ORDER BY r.due_at LIMIT ${CLAIM_SCAN}`).bind(now, JSON.stringify(possible.any), JSON.stringify(possible.manual)).all()).results;
+      choice = chooseClaims({ due, jobs, machine, machines, free, globalPause, now });
+    }
     claimable = choice.chosen;
     events.push(...choice.events);
   }

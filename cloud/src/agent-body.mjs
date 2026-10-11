@@ -55,14 +55,34 @@ function runId(value, name) {
   return value;
 }
 
+/**
+ * A figure the agent only reports (free capacity): clamped into range rather
+ * than refused, because a refused sync renews no lease and the same body
+ * would be refused on every retry.
+ */
+function advisory(value, maximum) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return null;
+  return Math.min(maximum, Math.max(0, value));
+}
+
 function free(value) {
-  const input = object(value, "machine.free");
+  const input = isObject(value) ? value : {};
   return {
-    cpus: number(input.cpus, "machine.free.cpus", { maximum: 1024 }),
-    memoryMiB: number(input.memoryMiB, "machine.free.memoryMiB", { maximum: 1024 * 1024 * 1024 }),
-    diskMiB: number(input.diskMiB, "machine.free.diskMiB", { maximum: 1024 * 1024 * 1024 }),
-    runs: number(input.runs, "machine.free.runs", { maximum: 1024, integer: true }),
+    cpus: advisory(input.cpus, 1024),
+    memoryMiB: advisory(input.memoryMiB, 1024 * 1024 * 1024),
+    diskMiB: advisory(input.diskMiB, 1024 * 1024 * 1024),
+    runs: advisory(input.runs, 1024) === null ? null : Math.floor(advisory(input.runs, 1024)),
   };
+}
+
+/** Health and VM state as reported, cut to what fits rather than refused: short strings, numbers, booleans. */
+function report(value, maxChars) {
+  const result = {};
+  for (const [key, item] of Object.entries(isObject(value) ? value : {}).slice(0, 20)) {
+    if (typeof item === "string") result[key.slice(0, 40)] = item.slice(0, 300);
+    else if (typeof item === "number" || typeof item === "boolean" || item === null) result[key.slice(0, 40)] = item;
+  }
+  return JSON.stringify(result).length > maxChars ? {} : result;
 }
 
 function logTail(value, name, bounds) {
@@ -116,9 +136,9 @@ export function parseSync(body) {
     agentTime: number(input.agentTime, "agentTime"),
     machine: {
       drain: flag(machine.drain, "machine.drain"),
-      vm: smallObject(machine.vm, "machine.vm", 512),
+      vm: report(machine.vm, 512),
       free: free(machine.free),
-      health: smallObject(machine.health, "machine.health", 2048),
+      health: report(machine.health, 2048),
     },
     runs,
     claim: flag(input.claim, "claim"),

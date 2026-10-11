@@ -6,7 +6,7 @@
 
 import { randomBytes } from "node:crypto";
 import { accessSync, constants as fsConstants } from "node:fs";
-import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, open, readdir, readFile, rename, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -108,12 +108,27 @@ export class StateDir {
     }
   }
 
-  /** Writes `text` to `file` as 0600, atomically. */
+  /**
+   * Writes `text` to `file` as 0600, atomically and durably: the data is
+   * flushed before the rename and the directory after it, so a power cut
+   * leaves either the old file or the new one, never an empty one.
+   */
   async writeSecure(file, text) {
     const temporary = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-    await writeFile(temporary, text, { mode: 0o600 });
-    await chmod(temporary, 0o600);
+    const handle = await open(temporary, "w", 0o600);
+    try {
+      await handle.writeFile(text);
+      await handle.chmod(0o600);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
     await rename(temporary, file);
+    const directory = await open(path.dirname(file), "r").catch(() => null);
+    if (directory) {
+      await directory.sync().catch(() => {});
+      await directory.close();
+    }
   }
 
   async readText(file) {

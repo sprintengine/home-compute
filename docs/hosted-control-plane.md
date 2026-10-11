@@ -350,7 +350,10 @@ Rules (unchanged from the current controller where it already defines them):
 - `retry.onFailed` (default 0 attempts; the next slot is the retry for scheduled importers) with `backoffSeconds`.
 - *As built (M2):* the time a run became `lost` is its `updated_at` (nothing else touches a lost
   row), and the grace counts from it. No retry is made when a newer run of the job exists (its
-  retry, a later slot or a manual run): under coalescing that run does the work.
+  retry, a later slot or a manual run): under coalescing that run does the work. A late
+  `complete` that recovers a run as succeeded **cancels its retry if that is still `due`**
+  (one that started keeps going, as above), and does not replace a newer finished run in
+  `schedule_state` (last run, `published`).
 
 ### 3.5 Queueing and placement
 

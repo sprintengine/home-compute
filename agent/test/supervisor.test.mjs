@@ -122,3 +122,11 @@ test("a runtime that will not start, or an image that will not pull, fails the r
   const slowPull = await supervise(t, { runtime: { pullMs: 5_000 }, config: { pullTimeoutSeconds: 0.1 } });
   assert.match(slowPull.record.error, /^pull timed out/);
 });
+
+test("a completion record is cut to fit 256 KB, newest output kept", async (t) => {
+  const wide = "界".repeat(120);
+  const { record } = await supervise(t, { script: { output: Array.from({ length: 600 }, (_, index) => `${index} ${wide}`), exitCode: 0 } });
+  assert.ok(Buffer.byteLength(JSON.stringify(record)) <= 256 * 1024 - 2048);
+  assert.match(record.logTail.text, /599 界+$/);
+  assert.equal(record.logTail.truncated, true);
+});

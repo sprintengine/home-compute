@@ -8,6 +8,7 @@
 import { PROTOCOL } from "../../src/core/protocol.mjs";
 import { systemClock } from "./clock.mjs";
 import { ControlPlaneClient, ControlPlaneError } from "./client.mjs";
+import { fitSyncBody } from "./fit.mjs";
 import { Outbox } from "./outbox.mjs";
 import { assertRuntime } from "./runtime/runtime.mjs";
 import { RunSupervisor } from "./supervisor.mjs";
@@ -25,6 +26,19 @@ const PHASE_SYNC_GAP_MS = 2_000;
 const READY_FAILURES_UNHEALTHY = 3;
 const DEFAULT_MAX_RUNS = 2;
 const CLOCK_SKEW_WARNING_MS = 30_000;
+/** While the runtime counts as failed, how often to try starting it again (nothing else would). */
+const RUNTIME_PROBE_MS = 5 * 60_000;
+const MAX_ERROR_CHARS = 300;
+/** Complete answers worth sending again later: a timeout, or the server's "it changed meanwhile; send it again". */
+const RETRY_COMPLETE = new Set([408, 409]);
+/** Complete answers that mean the server no longer knows the run: nothing left to deliver. */
+const GONE = new Set([404, 410]);
+
+function clip(text) {
+  if (text === null || text === undefined) return null;
+  const value = String(text);
+  return value.length > MAX_ERROR_CHARS ? `${value.slice(0, MAX_ERROR_CHARS - 1)}…` : value;
+}
 
 /** Exponential backoff with jitter: between half and all of min(5 min, 2^failures s). */
 export function backoffDelay(failures, random = Math.random) {
@@ -108,7 +122,8 @@ export class Agent {
         finished: () => this.#track(this.flushOutbox()),
         runtimeError: (error) => {
           this.readyFailures += 1;
-          this.runtimeError = error.message;
+          this.runtimeError = clip(error.message);
+          this.lastProbeAt = this.clock.now();
         },
         runtimeReady: () => {
           this.readyFailures = 0;
@@ -165,18 +180,19 @@ export class Agent {
       memoryMiB -= run.resources.memoryMiB ?? 0;
     }
     const disk = facts?.diskFreeMiB ?? 0;
+    // Never below zero: a run the server sent again, or a runtime that did not answer, must not make a body it refuses.
     return {
-      cpus: Math.round(cpus * 1000) / 1000,
-      memoryMiB,
-      diskMiB: typeof caps.diskMiB === "number" ? Math.min(caps.diskMiB, disk) : disk,
-      runs: (caps.maxRuns ?? DEFAULT_MAX_RUNS) - active.length,
+      cpus: Math.max(0, Math.round(cpus * 1000) / 1000),
+      memoryMiB: Math.max(0, memoryMiB),
+      diskMiB: Math.max(0, typeof caps.diskMiB === "number" ? Math.min(caps.diskMiB, disk) : disk),
+      runs: Math.max(0, (caps.maxRuns ?? DEFAULT_MAX_RUNS) - active.length),
     };
   }
 
   health() {
     return {
       docker: this.runtimeOk ? "ok" : "unreachable",
-      lastError: this.runtimeError,
+      lastError: clip(this.runtimeError),
       ...(this.readyFailures >= READY_FAILURES_UNHEALTHY ? { vm: "failed" } : {}),
     };
   }
@@ -187,14 +203,34 @@ export class Agent {
     return this.syncing;
   }
 
+  /**
+   * After three failed starts the machine reports its VM as failed and is
+   * given nothing, so no run would ever try the runtime again: try it here
+   * every 5 minutes, and clear the failure when it starts.
+   */
+  async #probeRuntime() {
+    if (this.readyFailures < READY_FAILURES_UNHEALTHY || this.runs.size) return;
+    if (this.lastProbeAt && this.clock.now() - this.lastProbeAt < RUNTIME_PROBE_MS) return;
+    this.lastProbeAt = this.clock.now();
+    try {
+      await this.runtime.ensureReady({ cpus: 1, memoryMiB: 512 });
+      this.readyFailures = 0;
+      this.runtimeError = null;
+      this.log("runtime_recovered", {});
+    } catch (error) {
+      this.runtimeError = clip(error.message);
+    }
+  }
+
   async #sync() {
+    await this.#probeRuntime();
     let facts = null;
     try {
       facts = await this.runtime.facts();
       this.runtimeOk = true;
     } catch (error) {
       this.runtimeOk = false;
-      this.runtimeError = error.message;
+      this.runtimeError = clip(error.message);
     }
     const entries = [...this.runs.values()].map((run) => run.syncEntry());
     const reported = new Set(entries.map(({ entry }) => entry.id));
@@ -210,6 +246,7 @@ export class Agent {
       runs: entries.map(({ entry }) => entry),
       claim,
     };
+    fitSyncBody(body);
     const sentAt = this.clock.now();
     const sentMono = this.clock.monotonic();
     let response;
@@ -284,8 +321,11 @@ export class Agent {
         for (const id of await this.outbox.ids()) {
           if (this.killed) return;
           const record = await this.outbox.get(id);
-          if (!record) {
-            await this.outbox.remove(id);
+          if (!record) continue;
+          if (record.unreadable) {
+            this.log("run_report_unreadable", { run: id });
+            await this.outbox.quarantine(id);
+            this.runs.delete(id);
             continue;
           }
           try {
@@ -294,14 +334,16 @@ export class Agent {
             this.runs.delete(id);
             this.log("run_reported", { run: id, state: body.state, recovered: body.recovered || undefined, duplicate: body.duplicate || undefined });
           } catch (error) {
-            if (error instanceof ControlPlaneError && error.kind === "rejected") {
-              // The server will never take it (it no longer knows the run, say): keep nothing that cannot be sent.
-              this.log("run_report_rejected", { run: id, error: error.message });
-              await this.outbox.remove(id);
+            if (error instanceof ControlPlaneError && error.kind === "rejected" && !RETRY_COMPLETE.has(error.status)) {
+              // The server will never take it as it is. A run it no longer knows needs nothing more; anything
+              // else is kept aside in outbox/rejected/ for a person, never just deleted.
+              this.log("run_report_rejected", { run: id, status: error.status, error: error.message });
+              if (GONE.has(error.status)) await this.outbox.remove(id);
+              else await this.outbox.quarantine(id);
               this.runs.delete(id);
               continue;
             }
-            this.#failed(error);
+            if (!(error instanceof ControlPlaneError && error.kind === "rejected")) this.#failed(error);
             return;
           }
         }
@@ -362,6 +404,14 @@ export class Agent {
   async stop() {
     this.stopped = true;
     this.wake();
+  }
+
+  /**
+   * Lets go of the runs without touching their containers (a service stop):
+   * their timers end, so the process can exit, and the next start adopts them.
+   */
+  detach() {
+    for (const run of this.runs.values()) if (!run.finished) run.abandon();
   }
 
   /** For tests: as if the process were killed: no more syncs, sends or results from this object. */

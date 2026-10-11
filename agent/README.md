@@ -42,7 +42,7 @@ hca status --state-dir /tmp/hc-agent      # from another terminal
 | Command | What it does |
 | --- | --- |
 | `enrol --server URL --join-token-stdin [--name NAME] [--runtime fake] [--reenrol]` | Spends a join token (read from stdin, so it never shows in `ps`; `--join-token TOKEN` works but warns) for this machine's id and credential, and writes the configuration and credential. The name, labels and capabilities come from the token; `--name` (default: the host name) is used only if the token names none. Refuses to replace an existing credential without `--reenrol`. |
-| `run` | The service: adopts containers left from before a restart, sends what waits in the outbox, then syncs at the interval `hc-core` sets. SIGTERM or SIGINT stops it; running containers are left alone and adopted next time. |
+| `run` | The service: adopts containers left from before a restart, sends what waits in the outbox, then syncs at the interval `hc-core` sets. SIGTERM or SIGINT stops it at once; running containers are left alone and adopted next time (FakeRuntime's, being in-process, end with it). |
 | `status [--json]` | Asks the running agent's local status server: connection, last and next sync, clock skew, drain, runtime, runs, outbox, upcoming slots. |
 | `doctor` | Checks the configuration, file permissions, credential, runtime and control plane; if the service is not running, makes one sync without claiming to prove the credential and measure clock skew. Exits 1 if anything failed. |
 | `version` | The agent version and protocol. |
@@ -68,7 +68,7 @@ temporary file, then a rename); `doctor` checks this.
 | `env` | Local secrets for `local:<NAME>` references, as `NAME=value` lines. They never leave the machine. |
 | `status-token` | The bearer token of the local status server. |
 | `state.json` | The local drain switch, kept across restarts. |
-| `outbox/<run>.json` | A run's final record, written before it is sent and deleted after a 2xx. |
+| `outbox/<run>.json` | A run's final record, written (and flushed to disk) before it is sent and deleted after a 2xx. A 409 keeps it for later; a run the server no longer knows (404) drops it; any other refusal moves it to `outbox/rejected/` for a person to look at. |
 | `runs/<run>.json` | A started run's claim and start time (secret names, never values), for adoption after a restart. |
 | `runs/<run>.log.gz` | The run's whole redacted log, kept 7 days. |
 
@@ -104,6 +104,13 @@ report. Without one, a container prints one line and exits 0.
   a slot this machine may claim. A phase change syncs early (at most every
   2 s) so the server stamps it. It claims only when not draining, not revoked,
   the runtime answers, and a run slot is free.
+- **Body limits.** Tails are cut (oldest lines first) until a sync fits
+  128 KB and a completion 256 KB in UTF-8, so wide or non-ASCII output never
+  produces a body the server refuses; free figures never go below zero and
+  runtime errors are cut to 300 characters.
+- **Runtime failures.** After three failed starts the machine reports its VM
+  as failed and claims nothing; while idle it tries the runtime again every 5
+  minutes and claims again once it starts.
 - **Failures.** 5xx, 429, Cloudflare's 1027 or no network: exponential backoff
   with jitter, at most 5 minutes; runs carry on and results wait in the
   outbox. 401/403: revoked; it claims nothing more, finishes its runs, keeps

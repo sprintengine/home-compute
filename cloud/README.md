@@ -227,7 +227,11 @@ A 401 says `{"code": "revoked"}` for a revoked machine and
   were won. Scheduled and retry runs of a paused or disabled job, or under
   the global pause, are not claimed; manual runs are (shadow mode's test run
   needs that). A claimed run its agent does not report in its next sync (the
-  answer was lost) is sent again.
+  answer was lost) is sent again, and counts against the machine's free
+  capacity. If none of the 20 oldest due runs is for this machine, a second
+  read looks only among jobs it could take, so blocked or mislabelled runs
+  cannot starve it. What an agent reports about itself (free capacity,
+  health) is clamped rather than refused: a refused sync renews no lease.
 - **Leases and last seen.** A lease is renewed once it is 30 s old rather
   than on every sync, and `last_seen_at` is written at most once a minute, so
   a machine counts as offline after 150 s without a recorded sync (the
@@ -244,7 +248,9 @@ A 401 says `{"code": "revoked"}` for a revoked machine and
   (`trackPublished`) and, for an interval job, its next slot. `retry.onFailed`
   makes a retry `backoffSeconds` later. Everything after the run's own update
   is guarded on it, so a lost race (the cron marking it lost meanwhile)
-  writes nothing and is settled again as what it became.
+  writes nothing and is settled again as what it became. A late, recovered
+  result never replaces a newer finished run as the job's last (nor its
+  `published`), and cancels its own retry if that has not started yet.
 - **Lost runs.** The cron marks expired leases `lost` and retries per §3.4:
   at once if the run never started, after `lostGraceSeconds` if it was
   running and the job says `onLostRunning`, at most `maxAttempts` attempts,

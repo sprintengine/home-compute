@@ -122,6 +122,17 @@ describe("authentication, body limits and the protocol", () => {
     expect((await agentCall("/agent/v1/provisioning/p_1/events", { credential: machine.credential, body: {} })).status).toBe(501);
   });
 
+  it("clamps what an agent reports about itself rather than refusing the sync", async () => {
+    const machine = await enrolMachine("box");
+    const response = await syncAs(machine, at(8), { machine: { drain: false, vm: { state: "x".repeat(5000) },
+      free: { cpus: -1, memoryMiB: -1024, diskMiB: 10, runs: -1 }, health: { docker: "ok", lastError: "e".repeat(10_000) } } });
+    expect(response.status).toBe(200);
+    expect(response.body.claims).toEqual([]);
+    const [row] = await rows("SELECT facts_json, health_json FROM machines");
+    expect(JSON.parse(row.facts_json).free).toEqual({ cpus: 0, memoryMiB: 0, runs: 0 });
+    expect(JSON.parse(row.health_json).lastError).toHaveLength(300);
+  });
+
   it("answers no-store, rejects malformed run reports, and records health, version and skew", async () => {
     const machine = await enrolMachine("box");
     const response = await syncAs(machine, at(8), { agentTime: at(8) + 45_000, machine: { ...syncBody().machine, health: { docker: "ok", diskFreeMiB: 1 } } });
@@ -240,6 +251,23 @@ describe("claims", () => {
     expect(await rows("SELECT id FROM runs")).toHaveLength(1);
   });
 
+  it("looks past the oldest 20 due runs when none of them is for this machine", async () => {
+    for (let index = 0; index < 21; index += 1) await manualRun(`vaulted-${index}`, { secretEnv: { KEY: "vault:secret" } }, at(8) + index);
+    const wanted = await manualRun("open", {}, at(8, 1));
+    const machine = await enrolMachine("box");
+    expect((await syncAs(machine, at(8, 2))).body.claims.map((claim) => claim.run.id)).toEqual([wanted]);
+  });
+
+  it("counts a claim it sends again against the machine's free capacity", async () => {
+    await manualRun("first");
+    await manualRun("second");
+    const machine = await enrolMachine("box");
+    const oneSlot = { ...syncBody().machine, free: { cpus: 4, memoryMiB: 6144, diskMiB: 40_000, runs: 1 } };
+    expect((await syncAs(machine, at(8, 0, 5), { machine: oneSlot })).body.claims).toHaveLength(1);
+    // The answer was lost: the agent still says it has one slot free, but the run sent again takes it.
+    expect((await syncAs(machine, at(8, 0, 15), { machine: oneSlot })).body.claims).toHaveLength(1);
+  });
+
   it("sends a claim again when its answer never reached the agent", async () => {
     const runId = await manualRun("ecmwf");
     const machine = await enrolMachine("box");
@@ -305,6 +333,9 @@ describe("progress, completion and retries", () => {
       next_due_at: at(14, 5, 15) });
     expect(JSON.parse(state.published_json)).toEqual({ ecmwf: { run: "2026101100", at: new Date(at(8, 5, 15)).toISOString(), seconds: 300, runId } });
 
+    const view = (await call(`/v1/runs/${runId}`)).body;
+    expect(view).toMatchObject({ claimedAt: new Date(at(8, 0, 5)).toISOString(), startedAt: new Date(at(8, 0, 15)).toISOString(),
+      durationSeconds: 300, pullSeconds: 0, stats: { samples: 100, peakMemoryBytes: 412_000_000, avgCpuPct: 40, peakCpuPct: 97 } });
     const again = await complete(machine, runId, { ...record, exitCode: 1 }, at(8, 6));
     expect(again.body).toMatchObject({ state: "succeeded", duplicate: true });
     expect((await runRow(runId)).finished_at).toBe(at(8, 5, 15));
@@ -343,7 +374,22 @@ describe("progress, completion and retries", () => {
     expect(back.body.cancel).toEqual([]);
     const late = await complete(machine, runId, { exitCode: 0 }, at(8, 3));
     expect(late.body).toMatchObject({ state: "succeeded", recovered: true });
-    expect((await runsOf("ecmwf")).map((run) => [run.state, run.recovered])).toEqual([["succeeded", 1], ["due", 0]]);
+    // Its retry had not started, so it is no longer needed.
+    expect((await runsOf("ecmwf")).map((run) => [run.state, run.recovered])).toEqual([["succeeded", 1], ["cancelled", 0]]);
+  });
+
+  it("a late, recovered result does not replace a newer run's as the job's last", async () => {
+    const report = { format: "json-lines", trackEvent: "forecast_complete", trackBy: "model" };
+    const { runId, machine } = await claimed({ report });
+    await cron(at(8, 1, 36));
+    const other = await enrolMachine("other");
+    const [retry] = (await syncAs(other, at(8, 2))).body.claims;
+    await complete(other, retry.run.id, { exitCode: 0, reports: [{ event: "forecast_complete", model: "ecmwf", run: "06" }] }, at(8, 3));
+    const late = await complete(machine, runId, { exitCode: 0, reports: [{ event: "forecast_complete", model: "ecmwf", run: "00" }] }, at(8, 4));
+    expect(late.body).toMatchObject({ state: "succeeded", recovered: true });
+    const [state] = await rows("SELECT last_run_id, published_json FROM schedule_state WHERE job_id = 'ecmwf'");
+    expect(state.last_run_id).toBe(retry.run.id);
+    expect(JSON.parse(state.published_json).ecmwf.run).toBe("06");
   });
 
   it("a run lost while running is retried only when idempotent, after the grace", async () => {

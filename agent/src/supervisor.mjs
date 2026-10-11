@@ -14,6 +14,7 @@ import { extractError } from "../../src/core/logs.mjs";
 import { JOB_LABEL, MAX_ERROR_DETAIL, RUN_LABEL } from "../../src/core/protocol.mjs";
 import { runOutcome } from "../../src/core/reports.mjs";
 import { LogCapture } from "./capture.mjs";
+import { fitRecord } from "./fit.mjs";
 import { specRefusal } from "./policy.mjs";
 
 const MIB = 1048576;
@@ -135,6 +136,8 @@ export class RunSupervisor {
   abandon() {
     this.aborted = true;
     this.exit.abort();
+    // Let a supervision waiting on a container that never exits return (with nothing).
+    this.giveUp.resolve({ exitCode: null, oomKilled: false, abandoned: true });
   }
 
   async #run() {
@@ -189,6 +192,13 @@ export class RunSupervisor {
     if (this.cancelRequested) return this.#finish({ cancelled: true });
     if (this.aborted) return null;
 
+    // Recorded before the container exists: a crash in between still knows which secrets to redact on adoption.
+    const runRecord = {
+      // Never a secret value on disk: secretEnv keeps only its names.
+      claim: { run: this.claim.run, spec: { ...spec, secretEnv: Object.keys(spec.secretEnv ?? {}) } },
+      containerId: null, startedAt: this.clock.now(), vmWaitMs: this.vmWaitMs, pullMs: this.pullMs, digest: this.digest,
+    };
+    await this.state.writeRunRecord(this.id, runRecord);
     this.handle = await this.runtime.run({
       runId: this.id,
       jobId: this.jobId,
@@ -203,11 +213,7 @@ export class RunSupervisor {
     });
     this.startedWall = this.clock.now();
     this.startedMono = this.clock.monotonic();
-    await this.state.writeRunRecord(this.id, {
-      // Never a secret value on disk: secretEnv keeps only its names.
-      claim: { run: this.claim.run, spec: { ...spec, secretEnv: Object.keys(spec.secretEnv ?? {}) } },
-      containerId: this.handle.id, startedAt: this.startedWall, vmWaitMs: this.vmWaitMs, pullMs: this.pullMs, digest: this.digest,
-    });
+    await this.state.writeRunRecord(this.id, { ...runRecord, containerId: this.handle.id, startedAt: this.startedWall });
     this.setPhase("running");
     return this.#supervise();
   }
@@ -332,6 +338,7 @@ export class RunSupervisor {
       },
       image: { ref: this.spec.image ?? null, digest: this.digest },
     };
+    fitRecord(record);
     await this.capture?.close();
     if (this.aborted) return null;
     // Written before it is sent, deleted only after a 2xx (§4.2).

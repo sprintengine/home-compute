@@ -6,7 +6,8 @@
 //   request limit). Try again later, with exponential backoff and jitter.
 // - `revoked`: 401/403. Claim nothing, finish current runs, keep results.
 // - `upgrade`: 426. The protocol is too old; self-update (M7).
-// - `rejected`: any other 4xx. That request will never succeed as it is.
+// - `rejected`: any other 4xx. That request will never succeed as it is
+//   (callers decide what is worth keeping: a 409 on complete is "try again").
 
 import { PROTOCOL } from "../../src/core/protocol.mjs";
 import { AGENT_VERSION } from "./version.mjs";

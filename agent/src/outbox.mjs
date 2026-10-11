@@ -2,7 +2,7 @@
 // is sent, and deleted only after the control plane answers 2xx, so a result
 // survives the network, the control plane and the agent itself going away.
 
-import { readdir, readFile, rm } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm } from "node:fs/promises";
 import path from "node:path";
 import { RUN_ID } from "../../src/core/protocol.mjs";
 
@@ -32,14 +32,28 @@ export class Outbox {
     }
   }
 
+  /** The record, null when there is none, or `{unreadable: true}` for a file that does not parse. */
   async get(runId) {
     try {
       return JSON.parse(await readFile(this.pathOf(runId), "utf8"));
     } catch (error) {
       if (error.code === "ENOENT") return null;
-      if (error instanceof SyntaxError) return null;
+      if (error instanceof SyntaxError) return { unreadable: true };
       throw error;
     }
+  }
+
+  /**
+   * Moves a record the control plane will never take (or that cannot be
+   * read) to `outbox/rejected/`, where it is kept for a person to look at
+   * rather than deleted.
+   */
+  async quarantine(runId) {
+    const directory = path.join(this.state.outboxDir, "rejected");
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    await rename(this.pathOf(runId), path.join(directory, `${runId}.json`)).catch((error) => {
+      if (error.code !== "ENOENT") throw error;
+    });
   }
 
   async remove(runId) {

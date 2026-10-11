@@ -235,3 +235,53 @@ test("after a restart the agent adopts its containers, and fails a run whose con
   assert.match(orphan.body.error, /container was gone/);
   assert.equal(orphan.body.failed, true);
 });
+
+test("a sync body stays inside 128 KB however wide its runs' output, and free figures never go below zero", async (t) => {
+  const bar = "█".repeat(150);
+  const runtime = new FakeRuntime({ script: { output: Array.from({ length: 400 }, (_, index) => `${index} ${bar}`), hang: true } });
+  const { agent, plane } = await makeAgent(t, { runtime, config: { caps: { maxRuns: 4, cpus: 1 } } });
+  for (let index = 0; index < 3; index += 1) plane.claims.push(claimFor(runId()));
+  await agent.syncOnce();
+  await until(() => [...agent.runs.values()].every((run) => run.capture?.linesTotal === 400));
+  runtime.facts = async () => {
+    throw new Error("docker: Cannot connect to the Docker daemon ".repeat(100));
+  };
+  await agent.syncOnce();
+  const sent = plane.fetch.requests.at(-1);
+  const bytes = Buffer.byteLength(JSON.stringify({ protocol: 1, ...sent.body }));
+  assert.ok(bytes <= 128 * 1024, `${bytes} bytes`);
+  assert.ok(sent.body.runs.every((run) => run.logTail.truncated));
+  assert.deepEqual(sent.body.machine.free, { cpus: 0, memoryMiB: 0, diskMiB: 0, runs: 1 });
+  assert.ok(sent.body.machine.health.lastError.length <= 300);
+  assert.equal(sent.body.claim, false, "the runtime did not answer");
+});
+
+test("a result is kept on a 409 (send again later), set aside on other refusals, and dropped only when the run is gone", async (t) => {
+  const { agent, plane, state } = await makeAgent(t);
+  const [again, refused, gone] = [runId(), runId(), runId()];
+  for (const id of [again, refused, gone]) await agent.outbox.put(id, { exitCode: 0 });
+  plane.completePlan.push({ status: 409, body: { error: "send it again" } });
+  await agent.flushOutbox();
+  assert.deepEqual(await agent.outbox.ids(), [again, refused, gone], "a 409 stops the round and keeps everything");
+  plane.completePlan.push(undefined, { status: 400, body: { error: "bad" } }, { status: 404, body: { error: "Unknown run" } });
+  await agent.flushOutbox();
+  assert.deepEqual(await agent.outbox.ids(), []);
+  const { readdir } = await import("node:fs/promises");
+  assert.deepEqual(await readdir(`${state.outboxDir}/rejected`), [`${refused}.json`]);
+  assert.deepEqual(plane.completes.map((entry) => entry.id), [again]);
+});
+
+test("after three failed runtime starts the machine reports its VM failed, and recovers when a probe starts it", async (t) => {
+  const runtime = new FakeRuntime({ failReady: 3 });
+  const { agent, plane } = await makeAgent(t, { runtime });
+  for (let index = 0; index < 3; index += 1) {
+    plane.claims.push(claimFor(runId()));
+    await agent.syncOnce();
+    await agent.idle();
+  }
+  await agent.syncOnce();
+  assert.deepEqual([plane.syncs.at(-1).body.machine.health.vm, plane.syncs.at(-1).body.claim], ["failed", false]);
+  agent.lastProbeAt = Date.now() - 5 * 60_000;
+  await agent.syncOnce();
+  assert.deepEqual([plane.syncs.at(-1).body.machine.health.vm, plane.syncs.at(-1).body.claim], [undefined, true]);
+});

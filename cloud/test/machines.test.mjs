@@ -49,6 +49,11 @@ describe("machines", () => {
     expect((await call(path, { method: "PATCH", body: { colour: "red" } })).status).toBe(400);
     await enrolMachine("other");
     expect((await call(path, { method: "PATCH", body: { name: "other" } })).status).toBe(409);
+    // A revoked machine's name can be taken.
+    const gone = await enrolMachine("old-box");
+    await call(`/v1/machines/${gone.machineId}`, { method: "DELETE" });
+    expect((await call(path, { method: "PATCH", body: { name: "old-box" } })).body.name).toBe("old-box");
+    await call(path, { method: "PATCH", body: { name: "linux-box" } });
     const revoked = await call(path, { method: "DELETE" });
     expect(revoked.body).toMatchObject({ revoked: true, changed: true });
     expect((await call(path, { method: "DELETE" })).body.changed).toBe(false);
@@ -57,7 +62,8 @@ describe("machines", () => {
     expect((await call("/v1/machines?all=1")).body.machines.find((entry) => entry.id === machine.machineId).status).toBe("revoked");
     const actions = (await rows("SELECT action FROM audit_log ORDER BY id")).map((row) => row.action);
     expect(actions.filter((action) => action.startsWith("machine."))).toEqual([
-      "machine.join-token", "machine.enrol", "machine.drain", "machine.update", "machine.join-token", "machine.enrol", "machine.revoke",
+      "machine.join-token", "machine.enrol", "machine.drain", "machine.update", "machine.join-token", "machine.enrol",
+      "machine.join-token", "machine.enrol", "machine.revoke", "machine.update", "machine.update", "machine.revoke",
     ]);
   });
 

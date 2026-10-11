@@ -109,6 +109,9 @@ export async function patchMachine({ db, request, params, identity, role, ip, no
   const changed = Object.keys(next).filter((key) => JSON.stringify(next[key]) !== JSON.stringify(current[key]));
   if (changed.length || body.rotateCredential) {
     await db.batch([
+      // Names are unique across revoked machines too: a revoked holder of the new name gives it up, as at enrolment.
+      db.prepare("UPDATE machines SET name = name || '~' || substr(id, -6) WHERE name = ? AND id != ? AND revoked_at IS NOT NULL")
+        .bind(next.name ?? current.name, row.id),
       db.prepare(`UPDATE machines SET name = ?, labels_json = ?, capacity_json = ?, capabilities = ?, drain = ?,
           rotate_requested_at = COALESCE(?, rotate_requested_at) WHERE id = ?`)
         .bind(next.name ?? current.name, JSON.stringify(next.labels ?? current.labels), JSON.stringify(next.capacity ?? current.capacity),

@@ -122,7 +122,10 @@ async function commandRun(options, io) {
     statusPort: statusServer?.port ?? null });
   await agent.run();
   await statusServer?.close();
+  // Running containers are left to themselves (the next start adopts them); only their supervision stops.
+  agent.detach();
   jsonLog("stopped", { runs: agent.runs.size });
+  io.exitAfter = true;
   return 0;
 }
 
@@ -214,6 +217,12 @@ async function commandDoctor(options, io) {
 /** Runs one command; returns its exit code. `io` is for tests. */
 export async function main(argv = process.argv.slice(2), io = {}) {
   const streams = {
+    get exitAfter() {
+      return io.exitAfter;
+    },
+    set exitAfter(value) {
+      io.exitAfter = value;
+    },
     out: io.out ?? ((text) => process.stdout.write(`${text}\n`)),
     error: io.error ?? ((text) => process.stderr.write(`${text}\n`)),
     stdin: io.stdin ?? process.stdin,
@@ -256,4 +265,9 @@ function invokedDirectly() {
   }
 }
 
-if (invokedDirectly()) process.exitCode = await main();
+if (invokedDirectly()) {
+  const io = {};
+  process.exitCode = await main(process.argv.slice(2), io);
+  // `run` ends here even if a runtime still holds timers (FakeRuntime's scripted containers, say).
+  if (io.exitAfter) process.exit();
+}
