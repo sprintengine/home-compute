@@ -20,8 +20,8 @@
   },
   "scripts": {
     "build:studio": "npm run build --workspace @home-compute/studio-module",
-    "check": "node --check src/*.mjs && node --test && npm run check --workspace @home-compute/studio-module",
-    "test": "node --test"
+    "check": "node --check src/*.mjs && node --check dashboard/app.js && node --test 'test/*.test.mjs' && npm run check --workspace @home-compute/studio-module",
+    "test": "node --test 'test/*.test.mjs'"
   },
   "engines": {
     "node": ">=22"

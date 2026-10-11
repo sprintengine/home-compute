@@ -40,3 +40,32 @@ test("validateConfig accepts UTC slots and rejects malformed ones", async () => 
   assert.throws(() => validateConfig(base({ at: {}, every: "1h" })), /exactly one/);
   assert.throws(() => validateConfig(base({ at: {}, timezone: "Europe/Dublin" })), /UTC/);
 });
+
+test("dashboard, history and timetable sections are checked", async () => {
+  const { validateConfig } = await import("../src/config.mjs");
+  const base = (extra) => ({ jobs: [{ id: "a", schedule: { every: "1h" }, task: { image: "x" } }], ...extra });
+  validateConfig(base({
+    history: { keep: 50 },
+    dashboard: { allowedLogins: ["me@example.com"], allowedLoginsEnv: "LOGINS", hosts: ["mac.example.ts.net"], sessionHours: 24 },
+    timetable: { command: ["./macmini.sh", "jobs", "set"], timeoutSeconds: 60 },
+  }));
+  assert.throws(() => validateConfig(base({ history: { keep: 0 } })), /keep/);
+  assert.throws(() => validateConfig(base({ dashboard: { allowedLogins: "me" } })), /allowedLogins/);
+  assert.throws(() => validateConfig(base({ dashboard: { allowedLoginsEnv: "bad-name" } })), /allowedLoginsEnv/);
+  assert.throws(() => validateConfig(base({ timetable: { command: "macmini.sh jobs set" } })), /non-empty array/);
+  assert.throws(() => validateConfig(base({ timetable: { command: ["macmini.sh"] } })), /must be a path/);
+  assert.throws(() => validateConfig(base({ timetable: { command: ["./x"], timeoutSeconds: 0 } })), /timeoutSeconds/);
+});
+
+test("a reload names what it changes and what needs a restart", async () => {
+  const { configDifferences, dashboardSettings } = await import("../src/config.mjs");
+  const job = (id, every = "1h") => ({ id, schedule: { every }, task: { image: "x" } });
+  const differences = configDifferences(
+    { pollEvery: "30s", jobs: [job("a"), job("b"), job("c")] },
+    { pollEvery: "1m", jobs: [job("a"), job("b", "2h"), job("d")] },
+  );
+  assert.deepEqual(differences, { added: ["d"], removed: ["c"], changed: ["b"], restartRequired: ["pollEvery"] });
+  assert.deepEqual(dashboardSettings({ dashboard: { allowedLogins: ["a@x"], allowedLoginsEnv: "L" } }, { L: "b@x, c@x" }).allowedLogins,
+    ["a@x", "b@x", "c@x"]);
+  assert.deepEqual(dashboardSettings({}, {}).allowedLogins, []);
+});

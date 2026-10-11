@@ -162,3 +162,63 @@ test("a run whose every report is unchanged is said so", async () => {
   assert.deepEqual(record.published, {}, "nothing new was published");
   assert.equal(record.activeJobId, undefined);
 });
+
+test("each run is kept in its job's history: queued, running, then its outcome and numbers", async () => {
+  const { HistoryStore } = await import("../src/history.mjs");
+  const { createRedactor } = await import("../src/redact.mjs");
+  const directory = await mkdtemp(path.join(os.tmpdir(), "home-compute-test-"));
+  const stateFile = path.join(directory, "state.json");
+  const history = new HistoryStore(path.join(directory, "history"));
+  const redact = createRedactor(["hunter2-secret"]);
+  const config = {
+    jobs: [{
+      id: "gfs",
+      schedule: { every: "1h" },
+      task: { image: "x", report: { format: "json-lines", trackEvent: "forecast_complete", trackBy: "model" } },
+    }],
+  };
+  let status = { state: "Queued", terminal: false, timing: { submittedAt: "2026-10-08T10:00:01.000Z" } };
+  const client = { async submit() { return "j-7"; }, async describe() { return status; } };
+  const pass = (at) => reconcile({ config, client, environment: {}, stateFile, now: new Date(at), logger: quietLogger(), history, redact });
+
+  await pass("2026-10-08T10:00:00Z");
+  assert.deepEqual(await history.runs("gfs").then(([run]) => [run.id, run.state, run.source]), ["j-7", "Submitted", "schedule"]);
+  await pass("2026-10-08T10:00:30Z");
+  assert.equal((await history.find("gfs", "j-7")).state, "Queued");
+  assert.equal((await history.find("gfs", "j-7")).startedAt, undefined);
+  status = { state: "Running", terminal: false, timing: { submittedAt: "2026-10-08T10:00:01.000Z", startedAt: "2026-10-08T10:02:00.000Z" } };
+  await pass("2026-10-08T10:03:00Z");
+  assert.equal((await history.find("gfs", "j-7")).queueSeconds, 120);
+
+  status = {
+    state: "Completed", terminal: true, exitCode: 0,
+    timing: { startedAt: "2026-10-08T10:02:00.000Z", finishedAt: "2026-10-08T10:07:30.000Z" },
+    stdout: `${JSON.stringify({ event: "forecast_complete", model: "gfs", run: "2026100806", seconds: 300, peakMemoryMb: 1830, cpuSeconds: 211.5 })}\n`,
+    stderr: "",
+  };
+  await pass("2026-10-08T10:08:00Z");
+  const run = await history.find("gfs", "j-7");
+  assert.equal(run.outcome, "published");
+  assert.equal(run.durationSeconds, 330);
+  assert.equal(run.queueSeconds, 120);
+  assert.deepEqual(run.metrics, { seconds: 300, peakMemoryMb: 1830, cpuSeconds: 211.5 });
+  assert.deepEqual(run.published, [{ key: "gfs", run: "2026100806" }]);
+  assert.equal(run.reports.length, 1);
+
+  // The next run fails; its output is kept, without the secret it printed.
+  client.submit = async () => "j-8";
+  await pass("2026-10-08T11:08:00Z");
+  status = { state: "Running", terminal: false };
+  await pass("2026-10-08T11:09:00Z");
+  status = {
+    state: "Completed", terminal: true, exitCode: 1, stdout: "",
+    stderr: "using key hunter2-secret\nTraceback (most recent call last):\nRuntimeError: HTTP 503\n",
+  };
+  await pass("2026-10-08T11:10:00Z");
+  const failed = (await history.runs("gfs"))[0];
+  assert.equal(failed.outcome, "failed");
+  assert.equal(failed.exitCode, 1);
+  assert.match(failed.failureDetail, /RuntimeError: HTTP 503/);
+  assert.doesNotMatch(failed.failureDetail, /hunter2/);
+  assert.equal((await history.runs("gfs")).length, 2);
+});

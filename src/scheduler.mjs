@@ -2,6 +2,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { buildJobSpec } from "./bacalhau.mjs";
 import { parseDuration } from "./config.mjs";
+import { redactValue } from "./redact.mjs";
 
 export async function readState(filename) {
   try {
@@ -155,20 +156,108 @@ export async function recordFinished({ job, record, status, client, now }) {
   };
 }
 
-export async function reconcile({ config, client, environment, stateFile, now = new Date(), logger = console }) {
+const FAILURE_DETAIL_LINES = 40;
+
+/** Runs a history write, logging rather than throwing: history never stops scheduling. */
+async function keepHistory(logger, job, operation) {
+  try {
+    await operation();
+  } catch (error) {
+    logger.error(JSON.stringify({ event: "history_error", job, error: error.message }));
+  }
+}
+
+/** The end of a failed run's own output, redacted, for the run's history. */
+function failureDetail(status, redact) {
+  const lines = [];
+  if (status.errorMessage) lines.push(status.errorMessage);
+  const output = String(status.stderr ?? "").trim() || String(status.stdout ?? "").trim();
+  if (output) lines.push(...output.split(/\r?\n/).slice(-FAILURE_DETAIL_LINES));
+  return lines.length ? redact(lines.join("\n")) : undefined;
+}
+
+/** Notes a submission in the job's history. */
+export async function recordSubmitted({ history, job, bacalhauJobId, submittedAt, source, parameters, logger = console }) {
+  if (!history) return;
+  await keepHistory(logger, job.id, () => history.record(job.id, bacalhauJobId, {
+    source,
+    submittedAt,
+    state: "Submitted",
+    ...(parameters?.length ? { parameters } : {}),
+  }));
+}
+
+/** Notes what a run still going looks like now: queued, or running since when. */
+async function recordProgress({ history, job, record, status, now, logger }) {
+  if (!history) return;
+  await keepHistory(logger, job.id, async () => {
+    const known = await history.find(job.id, record.activeJobId);
+    const startedAt = status.timing?.startedAt
+      ?? known?.startedAt
+      ?? (/^running$/i.test(status.state) ? now.toISOString() : undefined);
+    await history.record(job.id, record.activeJobId, {
+      state: status.state,
+      submittedAt: known?.submittedAt ?? status.timing?.submittedAt ?? record.lastSubmittedAt,
+      ...(startedAt ? { startedAt } : {}),
+    });
+  });
+}
+
+/**
+ * Records a run that reached a terminal state, as `recordFinished` does, and
+ * keeps it in the job's history with its timing, reports and, when it failed,
+ * the end of its output. Everything kept is passed through `redact`.
+ */
+export async function settleRun({ job, record, status, client, now, history, redact = (text) => text, logger = console }) {
+  const submittedAt = record.lastSubmittedAt;
+  const event = await recordFinished({ job, record, status, client, now });
+  if (history) {
+    await keepHistory(logger, job.id, async () => {
+      const known = await history.find(job.id, event.bacalhauJobId);
+      const trackEvent = job.task.report?.trackEvent;
+      const trackBy = job.task.report?.trackBy ?? "key";
+      const published = trackEvent
+        ? event.reports.filter((entry) => entry.event === trackEvent)
+          .map((entry) => ({ key: String(entry[trackBy] ?? job.id), run: entry.run ?? null, ...(entry.status ? { status: entry.status } : {}) }))
+        : [];
+      await history.record(job.id, event.bacalhauJobId, {
+        submittedAt: known?.submittedAt ?? status.timing?.submittedAt ?? submittedAt,
+        startedAt: status.timing?.startedAt ?? known?.startedAt,
+        finishedAt: status.timing?.finishedAt ?? record.lastFinishedAt,
+        state: event.state,
+        outcome: event.outcome,
+        exitCode: event.exitCode ?? undefined,
+        ...(event.outcome === "failed" ? {
+          error: record.lastError ? redact(record.lastError) : undefined,
+          failureDetail: failureDetail(status, redact),
+        } : {}),
+        ...(job.task.report?.format === "json-lines" ? { reports: redactValue(event.reports, redact) } : {}),
+        ...(published.length ? { published } : {}),
+      });
+    });
+  }
+  return event;
+}
+
+export async function reconcile({
+  config, client, environment, stateFile, now = new Date(), logger = console, history, redact = (text) => text,
+}) {
   const state = await readState(stateFile);
   const events = [];
   for (const job of config.jobs) {
     const record = (state.jobs[job.id] ??= {});
+    if (history) await keepHistory(logger, job.id, () => history.seed(job.id, record));
     if (record.activeJobId) {
       try {
         const status = await client.describe(record.activeJobId);
         record.lastObservedState = status.state;
         record.lastObservedAt = now.toISOString();
         if (status.terminal) {
-          const event = await recordFinished({ job, record, status, client, now });
+          const event = await settleRun({ job, record, status, client, now, history, redact, logger });
           events.push(event);
           logger.log(JSON.stringify({ ...event, reports: event.reports.length }));
+        } else {
+          await recordProgress({ history, job, record, status, now, logger });
         }
       } catch (error) {
         events.push({ event: "status_error", job: job.id, bacalhauJobId: record.activeJobId, error: error.message });
@@ -185,6 +274,7 @@ export async function reconcile({ config, client, environment, stateFile, now = 
       record.lastObservedState = "Submitted";
       record.lastSubmissionError = undefined;
       record.lastSubmissionErrorAt = undefined;
+      await recordSubmitted({ history, job, bacalhauJobId, submittedAt: record.lastSubmittedAt, source: "schedule", logger });
       const event = { event: "job_submitted", job: job.id, bacalhauJobId };
       events.push(event);
       logger.log(JSON.stringify(event));
