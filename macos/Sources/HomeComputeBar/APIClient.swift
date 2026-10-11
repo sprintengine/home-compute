@@ -71,6 +71,31 @@ struct APIClient: Sendable {
         try Self.check(response, data)
     }
 
+    /// A one-time link that signs the browser in to the dashboard (`POST /v1/session/link`),
+    /// landing on `page` (a dashboard route such as `#/job/gfs`) when given.
+    @concurrent func dashboardLink(page: String? = nil) async throws -> URL {
+        var req = try request("v1/session/link", method: "POST")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = Data("{}".utf8)
+        let (data, response) = try await Self.session.data(for: req)
+        try Self.check(response, data)
+        struct Body: Decodable { var url: String }
+        let link = try JSONDecoder().decode(Body.self, from: data)
+        guard let url = DashboardURL.withPage(link.url, page: page) else { throw APIError.invalidURL(link.url) }
+        return url
+    }
+
+    /// Asks the controller to re-read its configuration (`POST /v1/reload`), so a timetable
+    /// change applies without a restart. Older controllers answer 404.
+    @concurrent func reload() async throws -> ReloadResult {
+        var req = try request("v1/reload", method: "POST")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = Data("{}".utf8)
+        let (data, response) = try await Self.session.data(for: req)
+        try Self.check(response, data)
+        return try JSONDecoder().decode(ReloadResult.self, from: data)
+    }
+
     /// Reads `GET /v1/events` until the stream ends or fails. Byte-level line splitting
     /// (rather than `bytes.lines`) keeps the blank lines that terminate SSE events.
     @concurrent func streamEvents(_ onEvent: @Sendable (ServerEvent) async -> Void) async throws {
@@ -147,5 +172,61 @@ struct SSEParser {
         default: break
         }
         return nil
+    }
+}
+
+/// The answer to `POST /v1/reload`.
+struct ReloadResult: Decodable, Sendable, Equatable {
+    var added: [String] = []
+    var removed: [String] = []
+    var changed: [String] = []
+    /// Configuration sections that changed but only apply at the next restart.
+    var restartRequired: [String] = []
+
+    private enum CodingKeys: String, CodingKey { case added, removed, changed, restartRequired }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        added = c.lenient(.added) ?? []
+        removed = c.lenient(.removed) ?? []
+        changed = c.lenient(.changed) ?? []
+        restartRequired = c.lenient(.restartRequired) ?? []
+    }
+
+    var appliedWithoutRestart: Bool { restartRequired.isEmpty }
+}
+
+/// The dashboard's addresses.
+enum DashboardURL {
+    /// The dashboard at the controller's own address (`http://127.0.0.1:4786/`).
+    static func base(_ controllerURL: String) -> URL? {
+        guard var components = URLComponents(string: controllerURL.trimmingCharacters(in: .whitespacesAndNewlines)),
+              components.scheme == "http" || components.scheme == "https", components.host != nil else { return nil }
+        components.path = "/"
+        components.query = nil
+        components.fragment = nil
+        return components.url
+    }
+
+    /// A sign-in link with `next` set to a dashboard route, so the browser lands on that page.
+    static func withPage(_ link: String, page route: String?) -> URL? {
+        guard var components = URLComponents(string: link) else { return nil }
+        if let next = page(route) {
+            components.queryItems = (components.queryItems ?? []) + [URLQueryItem(name: "next", value: "#" + next)]
+        }
+        return components.url
+    }
+
+    /// The fragment for a route such as "#/job/gfs" ("/job/gfs"), or nil.
+    private static func page(_ route: String?) -> String? {
+        guard let route, route.hasPrefix("#/") else { return nil }
+        return String(route.dropFirst())
+    }
+
+    /// The route of a job's page, or of one of its runs.
+    static func route(job: String, run: String? = nil) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        let encode = { (value: String) in value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value }
+        return "#/job/\(encode(job))" + (run.map { "/run/\(encode($0))" } ?? "")
     }
 }

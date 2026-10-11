@@ -86,8 +86,10 @@ Nothing runs on the main thread.
 - **Connection**: the controller URL and token, the setup script, launch at login and
   notifications, as described above.
 
-After you save storage settings, rotate the token or edit the timetable, the tab shows a banner:
-"Restart the scheduler to apply your changes". Its button runs `restart controller`.
+After you save storage settings or rotate the token, the tab shows a banner: "Restart the
+scheduler to apply your changes". Its button runs `restart controller`. After a timetable edit the
+app first asks the controller to reload its configuration (`POST /v1/reload`); the banner only
+appears if that fails (an older controller, or one that is not running).
 
 Long commands (`setup`, `start`, `stop`, `restart`, `restart controller`, `image`,
 `colima-autostart on|off`) stream their output into a log sheet with a spinner. ANSI colours are
@@ -114,9 +116,16 @@ out after 30–120 s.
   - The header shows controller status (online, degraded or unreachable), the node count, the
     last update time, whether the event stream is live, and a refresh button.
   - "Running now" shows each running job with elapsed time.
+  - "Recent runs" lists the last five finished runs across all jobs (outcome, peak memory when the
+    job reports it, duration, how long ago); failures are red. Click one to open it in the web
+    dashboard. Controllers without run history leave this section out.
   - The job list shows each job's models, schedule, next run, last result and the last fetched
     model run for each model.
   - Each job has a ⋯ menu (or right-click) with Run now, Pause and Resume.
+  - **Open dashboard** (⌘D) in the footer opens the controller's web dashboard
+    (`../docs/dashboard.md`) in your browser, already signed in: the app asks the controller for a
+    one-time link (`POST /v1/session/link`, with its token) that is good for one minute and one use.
+    If the controller can't mint one, the plain address opens and asks for the token.
 
 The app follows `GET /v1/events` (Server-Sent Events) and fetches the snapshot again on every
 event. If the stream drops, it reconnects with backoff. It also polls `GET /v1/snapshot` every

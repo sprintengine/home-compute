@@ -18,6 +18,9 @@ struct PopoverView: View {
                     if !store.runningJobs.isEmpty {
                         RunningSection(jobs: store.runningJobs)
                     }
+                    if let recent = store.snapshot?.recentRuns(), !recent.isEmpty {
+                        RecentRunsSection(runs: recent)
+                    }
                     JobsSection(jobs: store.jobs)
                 }
                 .padding(12)
@@ -64,6 +67,11 @@ struct PopoverView: View {
                     openSettings()
                 }
                 .keyboardShortcut(",")
+                Button("Open dashboard") {
+                    Task { await store.openDashboard() }
+                }
+                .keyboardShortcut("d")
+                .help("The web dashboard: run history, logs and the timetable")
                 Spacer()
                 Button("Quit") { NSApp.terminate(nil) }
                     .keyboardShortcut("q")
@@ -318,6 +326,52 @@ struct RunningSection: View {
                 .background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
             }
         }
+    }
+}
+
+// MARK: - Recent runs
+
+/// The last few finished runs across all jobs, failures in red; a click opens that run in the dashboard.
+struct RecentRunsSection: View {
+    @Environment(Store.self) private var store
+    let runs: [RunSummary]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            SectionTitle("Recent runs")
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(runs) { run in
+                        row(run, now: context.date)
+                    }
+                }
+            }
+        }
+    }
+
+    private func row(_ run: RunSummary, now: Date) -> some View {
+        let style = OutcomeStyle(outcome: run.outcome, state: run.state)
+        return Button {
+            Task { await store.openDashboard(route: DashboardURL.route(job: run.job, run: run.id)) }
+        } label: {
+            HStack(spacing: 6) {
+                Circle().fill(style.color).frame(width: 7, height: 7)
+                Text(run.job).fontWeight(.medium)
+                Text(style.label).foregroundStyle(style.color == .secondary ? .secondary : style.color)
+                Spacer(minLength: 4)
+                if let peak = run.peakMemoryMb {
+                    Text(Fmt.megabytes(peak)).foregroundStyle(.secondary)
+                }
+                if let seconds = run.durationSeconds {
+                    Text(Fmt.duration(seconds)).foregroundStyle(.secondary)
+                }
+                Text(Fmt.relative(run.finishedAt, now: now)).foregroundStyle(.secondary)
+            }
+            .font(.caption.monospacedDigit())
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(run.error ?? "Open this run in the dashboard")
     }
 }
 

@@ -220,6 +220,28 @@ final class Store {
         await refresh()
     }
 
+    // MARK: Dashboard
+
+    /// Opens the controller's web dashboard in the default browser, signed in through a one-time
+    /// link when the controller can mint one, else at its plain address (which then asks for the token).
+    func openDashboard(route: String? = nil) async {
+        let client = self.client
+        var url: URL?
+        do {
+            url = try await client.dashboardLink(page: route)
+        } catch {
+            Log.info("dashboard link failed: \(error.localizedDescription); opening the plain address")
+        }
+        if url == nil, let base = DashboardURL.base(config.url) {
+            url = route.flatMap { URL(string: base.absoluteString + $0) } ?? base
+        }
+        guard let url else {
+            actionMessage = APIError.invalidURL(config.url).localizedDescription
+            return
+        }
+        NSWorkspace.shared.open(url)
+    }
+
     // MARK: Icon animation
 
     private func updateAnimation() {

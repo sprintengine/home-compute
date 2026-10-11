@@ -32,6 +32,11 @@ enum Fmt {
         return String(format: "%dh %02dm", s / 3600, (s % 3600) / 60)
     }
 
+    /// A size in MB from a report's `…Mb` field: "912 MB", "1.8 GB".
+    static func megabytes(_ value: Double) -> String {
+        value >= 1024 ? String(format: "%.1f GB", value / 1024) : "\(Int(value.rounded())) MB"
+    }
+
     static func clock(_ date: Date) -> String {
         date.formatted(date: .omitted, time: .standard)
     }
@@ -106,7 +111,20 @@ struct OutcomeStyle {
             self.init(label: "Submission failed", color: .red)
             return
         }
-        switch job.outcome {
+        self.init(outcome: job.outcome)
+    }
+
+    /// A history run's outcome, else its Bacalhau state.
+    init(outcome: String?, state: String?) {
+        if outcome == nil, let state, ["failed", "error"].contains(state.lowercased()) {
+            self.init(outcome: "failed")
+        } else {
+            self.init(outcome: outcome?.lowercased() ?? state?.lowercased())
+        }
+    }
+
+    private init(outcome: String?) {
+        switch outcome {
         case "published": self.init(label: "Published", color: .green)
         case "unchanged": self.init(label: "No new run", color: .secondary)
         case "failed": self.init(label: "Failed", color: .red)

@@ -28,6 +28,25 @@ struct Controller: Decodable, Sendable {
     var status: String?
     var pollEvery: String?
     var clusterError: String?
+    /// What this controller can do ("history", "logs", "reload", "timetable"); nil from older ones.
+    var features: [String]?
+}
+
+extension Snapshot {
+    /// Every job's finished runs, newest first: what the menu shows under "Recent runs".
+    func recentRuns(limit: Int = 5) -> [RunSummary] {
+        let finished = jobs.flatMap { job in
+            (job.recentRuns ?? []).filter(\.isFinished).map { run in
+                var run = run
+                if run.job.isEmpty { run.job = job.id }
+                return run
+            }
+        }
+        return Array(finished.sorted { ($0.finishedAt ?? .distantPast) > ($1.finishedAt ?? .distantPast) }.prefix(limit))
+    }
+
+    /// Whether the controller serves the browser dashboard (and keeps run history).
+    var hasDashboard: Bool { controller?.features?.contains("history") == true }
 }
 
 struct Node: Decodable, Sendable {
@@ -99,6 +118,46 @@ struct PublishedRun: Decodable, Sendable {
     }
 }
 
+/// One run from a job's history (`recentRuns` in the snapshot; reports left out).
+struct RunSummary: Decodable, Sendable, Identifiable {
+    var id = ""
+    var job = ""
+    var state: String?
+    var outcome: String?
+    var exitCode: Int?
+    var error: String?
+    var submittedAt: Date?
+    var startedAt: Date?
+    var finishedAt: Date?
+    var durationSeconds: Double?
+    var queueSeconds: Double?
+    var peakMemoryMb: Double?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, job, state, outcome, exitCode, error, submittedAt, startedAt, finishedAt, durationSeconds, queueSeconds, metrics
+    }
+    private enum MetricKeys: String, CodingKey { case peakMemoryMb }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = c.string(.id) ?? ""
+        job = c.string(.job) ?? ""
+        state = c.string(.state)
+        outcome = c.string(.outcome)
+        exitCode = c.lenient(.exitCode)
+        error = c.string(.error)
+        submittedAt = c.date(.submittedAt)
+        startedAt = c.date(.startedAt)
+        finishedAt = c.date(.finishedAt)
+        durationSeconds = c.double(.durationSeconds)
+        queueSeconds = c.double(.queueSeconds)
+        peakMemoryMb = (try? c.nestedContainer(keyedBy: MetricKeys.self, forKey: .metrics))?.double(.peakMemoryMb)
+    }
+
+    var isFinished: Bool { finishedAt != nil }
+    var isFailed: Bool { outcome?.lowercased() == "failed" }
+}
+
 struct Job: Decodable, Sendable, Identifiable {
     var id = ""
     var enabled: Bool?
@@ -121,11 +180,13 @@ struct Job: Decodable, Sendable, Identifiable {
     var nextDueAt: Date?
     var lastReports: [Report]?
     var published: [String: PublishedRun]?
+    /// Newest first; absent from controllers that keep no history.
+    var recentRuns: [RunSummary]?
 
     private enum CodingKeys: String, CodingKey {
         case id, enabled, paused, schedule, labels, parameters, description, running, activeJobId, liveState
         case lastSubmittedAt, lastFinishedAt, lastFinishedState, lastFinishedJobId, lastExitCode, lastOutcome
-        case lastSubmissionError, lastSubmissionErrorAt, nextDueAt, lastReports, published
+        case lastSubmissionError, lastSubmissionErrorAt, nextDueAt, lastReports, published, recentRuns
     }
 
     init(from decoder: Decoder) throws {
@@ -151,6 +212,7 @@ struct Job: Decodable, Sendable, Identifiable {
         nextDueAt = c.date(.nextDueAt)
         lastReports = c.lenient(.lastReports)
         published = c.lenient(.published)
+        recentRuns = (c.lenient(.recentRuns) as [RunSummary]?)?.filter { !$0.id.isEmpty }
     }
 
     var isPaused: Bool { paused == true }

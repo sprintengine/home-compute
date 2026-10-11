@@ -310,12 +310,26 @@ final class ControlStore {
         guard !arguments.isEmpty else { return nil }
         do {
             let reply = try await script.reply(["jobs", "set", id] + arguments)
-            if reply.restartRequired != false { restartPending = true }
+            if reply.restartRequired != false, !(await reloadController()) { restartPending = true }
             Log.info("jobs set \(id) \(arguments.joined(separator: " ")): ok")
             await loadTimetable()
             return nil
         } catch {
             return error.localizedDescription
+        }
+    }
+
+    /// Has the running controller pick up a changed timetable in place (`POST /v1/reload`).
+    /// False when it can't (an older controller, or not answering): then it needs a restart.
+    private func reloadController() async -> Bool {
+        let client = APIClient(baseURL: host.config.url, token: host.config.token)
+        do {
+            let result = try await client.reload()
+            Log.info("controller reloaded: changed \(result.changed), restart for \(result.restartRequired)")
+            return result.appliedWithoutRestart
+        } catch {
+            Log.info("controller reload failed: \(error.localizedDescription)")
+            return false
         }
     }
 
