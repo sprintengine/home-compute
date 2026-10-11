@@ -9,6 +9,7 @@
 // `transition` is pure: it returns the run as the event leaves it, or throws a
 // TransitionError for an event the run's state does not allow.
 
+import { DEFAULT_RETRY } from "./job.mjs";
 import { reportedError, runOutcome } from "./reports.mjs";
 
 /** Claimed or later and not finished: the states `runs_one_active` allows one of per job. */
@@ -118,4 +119,44 @@ export function transition(run, event) {
     default:
       return refuse("unknown event");
   }
+}
+
+// ---------- Retries (§3.4)
+
+function retryPolicy(policy) {
+  return { ...DEFAULT_RETRY, ...(policy?.retry ?? {}) };
+}
+
+/**
+ * Whether, and from when, a lost run gets an automatic retry (a new due run
+ * with `attempt + 1` and `retry_of`). `run`: `{attempt, startedAt, lostAt}`;
+ * a run that never started its container had no side effects, so it is
+ * retried at once. One lost while running is retried only when the job
+ * declares itself idempotent (`retry.onLostRunning`), and only
+ * `lostGraceSeconds` after it was lost, so a network blip does not cause a
+ * double run. Either way at most `retry.maxAttempts` attempts in all.
+ *
+ * Returns `{retry: true, at}` (retry now), `{retry: false, at}` (not yet:
+ * look again at `at`) or `{retry: false, reason}` (never).
+ */
+export function lostRetry(run, policy, now) {
+  const retry = retryPolicy(policy);
+  if ((run.attempt ?? 1) >= retry.maxAttempts) return { retry: false, reason: "max-attempts" };
+  const lostAt = run.lostAt ?? now;
+  if (run.startedAt === null || run.startedAt === undefined) return { retry: true, at: lostAt };
+  if (!retry.onLostRunning) return { retry: false, reason: "started" };
+  const at = lostAt + retry.lostGraceSeconds * 1000;
+  return { retry: now >= at, at };
+}
+
+/**
+ * Whether a run that failed (or timed out) is retried, and when: up to
+ * `retry.onFailed` more attempts (default none: for scheduled importers the
+ * next slot is the retry), each `backoffSeconds` after the failure.
+ */
+export function failedRetry(run, policy, now) {
+  const retry = retryPolicy(policy);
+  if (!["failed", "timed-out"].includes(run.state)) return { retry: false, reason: "not-failed" };
+  if ((run.attempt ?? 1) > retry.onFailed) return { retry: false, reason: "max-attempts" };
+  return { retry: true, at: now + retry.backoffSeconds * 1000 };
 }

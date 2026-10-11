@@ -71,7 +71,7 @@ export function jobEnvironmentNames(job) {
 export const OVERLAP = ["coalesce", "skip"];
 export const CATCH_UP = ["latest", "none"];
 export const NETWORKS = ["bridge", "none"];
-const DEFAULT_RETRY = { maxAttempts: 3, onLostRunning: false, lostGraceSeconds: 600, onFailed: 0, backoffSeconds: 300 };
+export const DEFAULT_RETRY = { maxAttempts: 3, onLostRunning: false, lostGraceSeconds: 600, onFailed: 0, backoffSeconds: 300 };
 
 function isObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -147,7 +147,8 @@ function normaliseSecretEnv(secretEnv, description) {
   return result;
 }
 
-function normaliseLabels(labels, description) {
+/** Labels as `{key: value}` strings, sorted by key. */
+export function normaliseLabels(labels, description = "labels") {
   const result = {};
   for (const [key, value] of Object.entries(objectOf(labels, description)).sort(([a], [b]) => a.localeCompare(b))) {
     if (!LABEL_KEY.test(key)) throw new Error(`${description}: invalid label ${JSON.stringify(key)}`);

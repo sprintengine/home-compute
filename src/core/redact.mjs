@@ -63,3 +63,29 @@ export function redactValue(value, redact, depth = 0) {
   if (Array.isArray(value)) return value.map((item) => redactValue(item, redact, depth + 1));
   return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactValue(item, redact, depth + 1)]));
 }
+
+function base64(text) {
+  let binary = "";
+  for (const byte of new TextEncoder().encode(text)) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+/**
+ * Each secret value with the forms it may take in output (§4.6): as is,
+ * URL-encoded, and base64 (padded and unpadded, standard and URL-safe).
+ * Values under 4 characters are left out: they would only mangle the log.
+ */
+export function secretForms(values) {
+  const forms = new Set();
+  for (const value of values) {
+    if (typeof value !== "string" || value.length < 4) continue;
+    forms.add(value);
+    forms.add(encodeURIComponent(value));
+    const encoded = base64(value);
+    const unpadded = encoded.replace(/=+$/, "");
+    forms.add(encoded);
+    forms.add(unpadded);
+    forms.add(unpadded.replace(/\+/g, "-").replace(/\//g, "_"));
+  }
+  return [...forms].filter((form) => form.length >= 4).sort((a, b) => b.length - a.length);
+}
