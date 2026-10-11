@@ -187,6 +187,17 @@ possible resource. A future secret-provider milestone will avoid putting
 long-lived credentials in stored job specifications. Never add secret values to
 the JSON configuration.
 
+## Hosted control plane (in progress)
+
+[docs/hosted-control-plane.md](docs/hosted-control-plane.md) designs the
+replacement for Bacalhau and the local daemon: a control plane on Cloudflare's
+free plan and a pull-based agent on each machine. Its first two milestones are
+here: the pure scheduling, report and job code in `src/core` (which this
+controller now uses too), and the two Workers with their D1 schema in
+[cloud/](cloud/README.md), including `home-compute cloud import` for moving a
+job file across. Nothing changes for the controller described above until the
+agent ships.
+
 ## Licence
 
 Home Compute is licensed under Apache License 2.0. Bacalhau is not copied or
