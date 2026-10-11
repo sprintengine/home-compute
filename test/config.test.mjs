@@ -29,3 +29,14 @@ test("readEnvFile reads comments, quotes, and empty optional values", async () =
     REGION: "eu-west-1",
   });
 });
+
+test("validateConfig accepts UTC slots and rejects malformed ones", async () => {
+  const { validateConfig } = await import("../src/config.mjs");
+  const base = (schedule) => ({ jobs: [{ id: "a", schedule, task: { image: "x" } }] });
+  validateConfig(base({ at: { hours: [3, 9], minutes: [30] } }));
+  validateConfig(base({ at: { minutes: [45] }, timezone: "UTC" }));
+  assert.throws(() => validateConfig(base({ at: { hours: [24] } })), /0 to 23/);
+  assert.throws(() => validateConfig(base({ at: { minutes: [] } })), /non-empty/);
+  assert.throws(() => validateConfig(base({ at: {}, every: "1h" })), /exactly one/);
+  assert.throws(() => validateConfig(base({ at: {}, timezone: "Europe/Dublin" })), /UTC/);
+});

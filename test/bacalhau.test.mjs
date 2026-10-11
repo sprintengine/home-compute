@@ -65,3 +65,35 @@ test("BacalhauClient recognises terminal and active job states", async () => {
     terminal: true,
   });
 });
+
+test("each submission is named apart so Bacalhau runs it again", () => {
+  const first = buildJobSpec(job, { IMAGE: "i", S3_BUCKET: "b", AWS_SECRET_ACCESS_KEY: "s" }, { now: new Date("2026-10-08T10:00:00.123Z") });
+  const second = buildJobSpec(job, { IMAGE: "i", S3_BUCKET: "b", AWS_SECRET_ACCESS_KEY: "s" }, { now: new Date("2026-10-08T11:00:00.000Z") });
+  assert.equal(first.Name, "wingfoil-forecast-20261008t100000z");
+  assert.notEqual(first.Name, second.Name);
+  assert.equal(first.Labels["home-compute.job"], "wingfoil-forecast");
+});
+
+test("describe reads the newest execution's exit code and output", async () => {
+  const execute = async () => ({
+    stdout: JSON.stringify({
+      Job: { State: { StateType: "Completed" } },
+      Executions: { Items: [
+        { ID: "e-old", JobVersion: 1, RunOutput: { ExitCode: 0, Stdout: "old" } },
+        { ID: "e-new", JobVersion: 2, RunOutput: { ExitCode: 2, Stdout: "", stderr: "bad", StdoutTruncated: false } },
+      ] },
+    }),
+  });
+  const status = await new BacalhauClient({ execute }).describe("j-1");
+  assert.equal(status.exitCode, 2);
+  assert.equal(status.executionId, "e-new");
+  assert.equal(status.stderr, "bad");
+  assert.equal(status.terminal, true);
+});
+
+test("an entrypoint replaces the image's own when a job names one", () => {
+  const environment = { IMAGE: "i", S3_BUCKET: "b", AWS_SECRET_ACCESS_KEY: "s" };
+  assert.equal(buildJobSpec(job, environment).Tasks[0].Engine.Params.Entrypoint, undefined);
+  const sweep = { ...job, task: { ...job.task, entrypoint: ["sh", "-c", "prune"] } };
+  assert.deepEqual(buildJobSpec(sweep, environment).Tasks[0].Engine.Params.Entrypoint, ["sh", "-c", "prune"]);
+});

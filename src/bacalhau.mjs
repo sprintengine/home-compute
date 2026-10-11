@@ -19,7 +19,17 @@ function environmentVariables(job, environment, redact) {
   });
 }
 
-export function buildJobSpec(job, environment = process.env, { redact = false } = {}) {
+/**
+ * Bacalhau treats a name it already knows as an update to that job, and an
+ * update whose spec has not changed as no work at all, so submitting a
+ * logical job under its own id would run it once and then never again. Each
+ * submission gets its own name; the `home-compute.job` label keeps the link.
+ */
+export function submissionName(job, now = new Date()) {
+  return `${job.id}-${now.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "z").toLowerCase()}`;
+}
+
+export function buildJobSpec(job, environment = process.env, { redact = false, now = new Date() } = {}) {
   const image = resolveTemplate(job.task.image, environment, `${job.id}.task.image`);
   const task = {
     Name: "main",
@@ -27,6 +37,7 @@ export function buildJobSpec(job, environment = process.env, { redact = false } 
       Type: "docker",
       Params: {
         Image: image,
+        ...(job.task.entrypoint ? { Entrypoint: Array.from(job.task.entrypoint, String) } : {}),
         Parameters: Array.from(job.task.parameters ?? [], String),
         EnvironmentVariables: environmentVariables(job, environment, redact),
       },
@@ -48,7 +59,7 @@ export function buildJobSpec(job, environment = process.env, { redact = false } 
     },
   };
   return {
-    Name: job.id,
+    Name: submissionName(job, now),
     Namespace: job.namespace ?? "home-compute",
     Type: "batch",
     Count: 1,
@@ -62,11 +73,35 @@ function findState(value, depth = 0) {
   if (!value || typeof value !== "object" || depth > 5) return undefined;
   if (typeof value.State === "string") return value.State;
   if (typeof value.state === "string") return value.state;
+  // Bacalhau 1.9 nests it: `"State": {"StateType": "Completed", "Message": ...}`.
+  if (typeof value.State?.StateType === "string") return value.State.StateType;
   for (const key of ["Job", "job", "Result", "result"]) {
     const state = findState(value[key], depth + 1);
     if (state) return state;
   }
   return undefined;
+}
+
+/**
+ * The newest execution's result. Bacalhau calls a batch job Completed when its
+ * container ran to the end, whatever it exited with, so the exit code is the
+ * only place a workload's own failure shows.
+ */
+function latestRun(result) {
+  const executions = Array.isArray(result?.Executions?.Items) ? result.Executions.Items : [];
+  const execution = executions
+    .filter((candidate) => candidate?.RunOutput)
+    .sort((a, b) => (b.JobVersion ?? 0) - (a.JobVersion ?? 0) || (b.ModifyTime ?? 0) - (a.ModifyTime ?? 0))[0];
+  if (!execution) return {};
+  const output = execution.RunOutput;
+  return {
+    executionId: execution.ID,
+    exitCode: Number.isInteger(output.ExitCode) ? output.ExitCode : undefined,
+    stdout: output.Stdout ?? output.stdout ?? "",
+    stderr: output.stderr ?? output.Stderr ?? "",
+    truncated: Boolean(output.StdoutTruncated || output.StderrTruncated),
+    errorMessage: output.ErrorMsg || undefined,
+  };
 }
 
 export class BacalhauClient {
@@ -107,7 +142,15 @@ export class BacalhauClient {
     const result = JSON.parse(stdout);
     const state = findState(result);
     if (!state) throw new Error(`Could not determine state of Bacalhau job ${jobId}`);
-    return { state, terminal: TERMINAL_STATES.has(state), raw: result };
+    return { state, terminal: TERMINAL_STATES.has(state), ...latestRun(result), raw: result };
+  }
+
+  /** The job's whole log, for when describe's copy of the output was truncated. */
+  async logs(jobId) {
+    const { stdout } = await this.execute(this.binary, ["job", "logs", jobId, ...this.commonArgs()], {
+      maxBuffer: 50 * 1024 * 1024,
+    });
+    return stdout;
   }
 
   async nodes() {
@@ -118,7 +161,14 @@ export class BacalhauClient {
   }
 
   async version() {
-    const { stdout } = await this.execute(this.binary, ["version"], { maxBuffer: 1024 * 1024 });
-    return stdout.trim();
+    const { stdout } = await this.execute(this.binary, ["version", "--output", "json", ...this.commonArgs()], {
+      maxBuffer: 1024 * 1024,
+    });
+    try {
+      const { clientVersion, serverVersion } = JSON.parse(stdout);
+      return `client ${clientVersion?.GitVersion ?? "unknown"}, server ${serverVersion?.GitVersion ?? "unreachable"}`;
+    } catch {
+      return stdout.trim();
+    }
   }
 }

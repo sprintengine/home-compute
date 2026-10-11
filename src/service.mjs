@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import { buildJobSpec } from "./bacalhau.mjs";
-import { readState, reconcile, writeState } from "./scheduler.mjs";
+import { nextDueAt, readState, reconcile, recordFinished, writeState } from "./scheduler.mjs";
 
 function requireJob(config, id) {
   if (typeof id !== "string" || !id) throw new Error("A job id is required");
@@ -70,16 +70,14 @@ export class HomeComputeService {
         if (!status.terminal) {
           throw new Error(`${job.id} already has active Bacalhau job ${record.activeJobId} (${status.state})`);
         }
-        record.lastFinishedJobId = record.activeJobId;
-        record.lastFinishedState = status.state;
-        record.lastFinishedAt = new Date().toISOString();
-        record.activeJobId = undefined;
+        this.emit(await recordFinished({ job, record, status, client: this.client, now: new Date() }));
       }
       const submittedJob = extraParameters.length
         ? { ...job, task: { ...job.task, parameters: [...(job.task.parameters ?? []), ...extraParameters] } }
         : job;
-      const bacalhauJobId = await this.client.submit(buildJobSpec(submittedJob, this.environment));
-      const now = new Date().toISOString();
+      const submittedAt = new Date();
+      const bacalhauJobId = await this.client.submit(buildJobSpec(submittedJob, this.environment, { now: submittedAt }));
+      const now = submittedAt.toISOString();
       Object.assign(record, {
         activeJobId: bacalhauJobId,
         lastSubmittedAt: now,
@@ -112,6 +110,7 @@ export class HomeComputeService {
   async snapshot({ live = true } = {}) {
     return this.serial(async () => {
       const state = await readState(this.stateFile);
+      const now = new Date();
       const jobs = [];
       for (const job of this.config.jobs) {
         const record = state.jobs[job.id] ?? {};
@@ -134,7 +133,10 @@ export class HomeComputeService {
           parameters: job.task.parameters ?? [],
           resources: job.task.resources ?? {},
           labels: job.labels ?? {},
+          ...(job.description ? { description: job.description } : {}),
           ...record,
+          running: Boolean(record.activeJobId),
+          nextDueAt: nextDueAt(job, record, now),
           ...(liveState ? { liveState } : {}),
           ...(liveError ? { liveError } : {}),
         });

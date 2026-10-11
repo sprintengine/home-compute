@@ -20,11 +20,139 @@ export async function writeState(filename, state) {
   await rename(temporary, filename);
 }
 
+const HOUR = 3_600_000;
+const DAY = 24 * HOUR;
+
+/** The slot times of an `at` schedule on the UTC day that starts at `dayStart`. */
+function slotsOn(at, dayStart) {
+  const hours = at.hours ?? Array.from({ length: 24 }, (_, hour) => hour);
+  const minutes = at.minutes ?? [0];
+  return hours.flatMap((hour) => minutes.map((minute) => dayStart + hour * HOUR + minute * 60_000))
+    .sort((a, b) => a - b);
+}
+
+function utcDayStart(time) {
+  return Math.floor(time / DAY) * DAY;
+}
+
+/** The latest slot at or before `now`, as epoch milliseconds. */
+export function previousSlot(at, now) {
+  const time = now.getTime();
+  const today = utcDayStart(time);
+  const earlier = slotsOn(at, today).filter((slot) => slot <= time);
+  return earlier.length ? earlier.at(-1) : slotsOn(at, today - DAY).at(-1);
+}
+
+/** The first slot after `time`, as epoch milliseconds. */
+export function nextSlot(at, time) {
+  const today = utcDayStart(time);
+  return slotsOn(at, today).find((slot) => slot > time) ?? slotsOn(at, today + DAY)[0];
+}
+
 export function isDue(job, record, now) {
   if (job.enabled === false || record?.paused === true) return false;
+  if (job.schedule.at) {
+    // Due once per slot: a slot that passed while the controller was down runs
+    // once on its return, never once per missed slot.
+    if (!record?.lastSubmittedAt) return true;
+    return new Date(record.lastSubmittedAt).getTime() < previousSlot(job.schedule.at, now);
+  }
   const anchor = record?.lastFinishedAt ?? record?.lastSubmittedAt;
   if (!anchor) return true;
   return now.getTime() - new Date(anchor).getTime() >= parseDuration(job.schedule.every);
+}
+
+/** When the job will next be submitted, or null while it is paused or running. */
+export function nextDueAt(job, record, now) {
+  if (job.enabled === false || record?.paused === true || record?.activeJobId) return null;
+  if (isDue(job, record, now)) return now.toISOString();
+  if (job.schedule.at) return new Date(nextSlot(job.schedule.at, now.getTime())).toISOString();
+  const anchor = new Date(record.lastFinishedAt ?? record.lastSubmittedAt).getTime();
+  return new Date(anchor + parseDuration(job.schedule.every)).toISOString();
+}
+
+/** Every line of a workload's output that is a JSON object naming an `event`. */
+export function parseReports(text) {
+  const reports = [];
+  for (const line of String(text ?? "").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("{")) continue;
+    try {
+      const value = JSON.parse(trimmed);
+      if (value && typeof value.event === "string") reports.push(value);
+    } catch {
+      // Not every brace-led line is a report.
+    }
+  }
+  return reports.slice(-50);
+}
+
+function outcomeOf(state, exitCode, reports, report) {
+  if (state !== "Completed" || (exitCode !== undefined && exitCode !== 0)
+    || reports.some((entry) => entry.event.endsWith("_failed"))) {
+    return "failed";
+  }
+  if (report?.trackEvent && reports.some((entry) => entry.event === report.trackEvent)) return "published";
+  if (reports.length && reports.every((entry) => entry.event.endsWith("_unchanged"))) return "unchanged";
+  return "completed";
+}
+
+/**
+ * Record a run that has reached a terminal state: its exit code, its outcome
+ * and, for a job that reports in JSON lines, what it said. `published` keeps
+ * the latest tracked event per key across runs, so a run that found nothing new
+ * does not hide when something last was.
+ */
+export async function recordFinished({ job, record, status, client, now }) {
+  const report = job.task.report;
+  let reports = [];
+  if (report?.format === "json-lines") {
+    let text = `${status.stdout ?? ""}\n${status.stderr ?? ""}`;
+    if (status.truncated && client.logs) {
+      try {
+        text = await client.logs(record.activeJobId);
+      } catch {
+        // Keep the truncated copy; a partial report beats none.
+      }
+    }
+    reports = parseReports(text);
+  }
+  const failedExit = status.exitCode !== undefined && status.exitCode !== 0;
+  const state = status.state === "Completed" && failedExit ? "Failed" : status.state;
+  const outcome = outcomeOf(status.state, status.exitCode, reports, report);
+  Object.assign(record, {
+    lastFinishedJobId: record.activeJobId,
+    lastFinishedState: state,
+    lastFinishedAt: now.toISOString(),
+    lastExitCode: status.exitCode ?? null,
+    lastOutcome: outcome,
+    lastError: outcome === "failed"
+      ? (reports.findLast((entry) => entry.error)?.error ?? status.errorMessage
+        ?? (failedExit ? `exited with ${status.exitCode}` : `ended ${status.state}`))
+      : undefined,
+    activeJobId: undefined,
+  });
+  if (report?.format === "json-lines") record.lastReports = reports;
+  if (report?.trackEvent) {
+    const key = report.trackBy ?? "key";
+    record.published ??= {};
+    for (const entry of reports.filter((candidate) => candidate.event === report.trackEvent)) {
+      record.published[entry[key] ?? job.id] = {
+        run: entry.run ?? null,
+        at: entry.time ?? now.toISOString(),
+        seconds: entry.seconds ?? null,
+      };
+    }
+  }
+  return {
+    event: "job_finished",
+    job: job.id,
+    bacalhauJobId: record.lastFinishedJobId,
+    state,
+    exitCode: record.lastExitCode,
+    outcome,
+    reports,
+  };
 }
 
 export async function reconcile({ config, client, environment, stateFile, now = new Date(), logger = console }) {
@@ -38,11 +166,9 @@ export async function reconcile({ config, client, environment, stateFile, now = 
         record.lastObservedState = status.state;
         record.lastObservedAt = now.toISOString();
         if (status.terminal) {
-          record.lastFinishedJobId = record.activeJobId;
-          record.lastFinishedState = status.state;
-          record.lastFinishedAt = now.toISOString();
-          record.activeJobId = undefined;
-          events.push({ event: "job_finished", job: job.id, bacalhauJobId: record.lastFinishedJobId, state: status.state });
+          const event = await recordFinished({ job, record, status, client, now });
+          events.push(event);
+          logger.log(JSON.stringify({ ...event, reports: event.reports.length }));
         }
       } catch (error) {
         events.push({ event: "status_error", job: job.id, bacalhauJobId: record.activeJobId, error: error.message });
@@ -52,11 +178,13 @@ export async function reconcile({ config, client, environment, stateFile, now = 
     }
     if (record.activeJobId || !isDue(job, record, now)) continue;
     try {
-      const spec = buildJobSpec(job, environment);
+      const spec = buildJobSpec(job, environment, { now });
       const bacalhauJobId = await client.submit(spec);
       record.activeJobId = bacalhauJobId;
       record.lastSubmittedAt = now.toISOString();
       record.lastObservedState = "Submitted";
+      record.lastSubmissionError = undefined;
+      record.lastSubmissionErrorAt = undefined;
       const event = { event: "job_submitted", job: job.id, bacalhauJobId };
       events.push(event);
       logger.log(JSON.stringify(event));
