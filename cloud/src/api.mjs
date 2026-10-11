@@ -5,6 +5,8 @@
 import { classifyLines, tailLines } from "../../src/core/logs.mjs";
 import { newId } from "../../src/core/ids.mjs";
 import { jobDifferences, normaliseJob } from "../../src/core/job.mjs";
+import { preferredUntil } from "../../src/core/placement.mjs";
+import { isTerminal, transition, TransitionError } from "../../src/core/run.mjs";
 import { applyTimetable, timetableChange } from "../../src/core/timetable.mjs";
 import { DEFAULT_RETENTION } from "./cron.mjs";
 import {
@@ -245,6 +247,56 @@ export async function runLogs({ db, params, url }) {
   });
 }
 
+/**
+ * POST /v1/runs/:id/cancel: a waiting or active run becomes `cancelled`.
+ * An agent running it learns on its next sync (the run is in its `cancel`
+ * list), stops the container and still sends its final log.
+ */
+export async function cancelRun({ db, params, identity, ip, now }) {
+  const run = await requireRun(db, params.id);
+  try {
+    transition({ state: run.state }, { type: "cancel", at: now });
+  } catch (error) {
+    if (error instanceof TransitionError) throw new HttpError(409, `The run is already ${run.state}`);
+    throw error;
+  }
+  const [update] = await db.batch([
+    db.prepare(`UPDATE runs SET state = 'cancelled', finished_at = ?1, lease_expires_at = NULL, updated_at = ?1
+      WHERE id = ?2 AND state = ?3`).bind(now, run.id, run.state),
+    db.prepare(`INSERT INTO audit_log (at, actor, action, target, before_json, after_json, ip) SELECT ?, ?, 'run.cancel', ?, ?, ?, ? WHERE changes() = 1`)
+      .bind(now, identity.actor, run.id, JSON.stringify({ state: run.state, machine: run.machine_id }), JSON.stringify({ state: "cancelled" }), ip),
+  ]);
+  if (update.meta.changes !== 1) throw new HttpError(409, "The run changed meanwhile; look again");
+  return json(202, { event: "run_cancelled", runId: run.id, job: run.job_id, previousState: run.state, machine: run.machine_id ?? null });
+}
+
+/**
+ * POST /v1/runs/:id/retry: a finished (or lost) run again, as a new due run
+ * with `attempt + 1` and `retry_of`. Refused while the job has a run waiting,
+ * or (unless `force`) one active, as Run now is.
+ */
+export async function retryRun({ db, request, params, identity, ip, now }) {
+  const body = await readJson(request, { maxBytes: 1024 });
+  if (body.force !== undefined && typeof body.force !== "boolean") throw new HttpError(400, "force must be true or false");
+  const run = await requireRun(db, params.id);
+  if (!isTerminal(run.state) && run.state !== "lost") throw new HttpError(409, `The run is still ${run.state}`);
+  const job = await requireJob(db, run.job_id);
+  const { due, active } = await openRuns(db, job.id);
+  if (due) throw new HttpError(409, `${job.id} already has a run waiting (${due.id})`);
+  if (active && !body.force) throw new HttpError(409, `${job.id} already has an active run ${active.id} (${active.state})`);
+  const id = newId("r", now);
+  const [insert] = await db.batch([
+    db.prepare(`INSERT INTO runs (id, job_id, job_revision, slot_at, source, state, attempt, retry_of, due_at, preferred_until,
+        parameters_json, requested_by, created_at, updated_at)
+      VALUES (?1, ?2, ?3, NULL, 'retry', 'due', ?4, ?5, ?6, ?7, ?8, ?9, ?6, ?6) ON CONFLICT DO NOTHING`)
+      .bind(id, job.id, job.revision, run.attempt + 1, run.id, now, preferredUntil(job, now), run.parameters_json, identity.actor),
+    db.prepare(`INSERT INTO audit_log (at, actor, action, target, after_json, ip) SELECT ?, ?, 'run.retry', ?, ?, ? WHERE changes() = 1`)
+      .bind(now, identity.actor, run.id, JSON.stringify({ runId: id, attempt: run.attempt + 1 }), ip),
+  ]);
+  if (insert.meta.changes !== 1) throw new HttpError(409, `${job.id} already has a run waiting`);
+  return json(202, { event: "run_retried", runId: id, retryOf: run.id, job: job.id, attempt: run.attempt + 1 });
+}
+
 // ---------- Overview, changes, audit, settings, import
 
 export async function snapshot({ db, now }) {
@@ -253,16 +305,18 @@ export async function snapshot({ db, now }) {
 
 /**
  * A cursor over everything the overview shows: the newest run update, the
- * job/settings version and the newest machine heartbeat. 204 when `since`
+ * job/settings version, the newest machine heartbeat and the machines'
+ * version (drain, labels, revocation). 204 when `since`
  * is still current, so an idle dashboard's poll costs three indexed reads.
  */
 export async function changes({ db, url }) {
-  const [runs, version, machines] = await db.batch([
+  const [runs, versions, machines] = await db.batch([
     db.prepare("SELECT MAX(updated_at) AS at FROM runs"),
-    db.prepare("SELECT value_json FROM settings WHERE key = 'jobs_version'"),
+    db.prepare("SELECT key, value_json FROM settings WHERE key IN ('jobs_version', 'machines_version')"),
     db.prepare("SELECT MAX(COALESCE(last_seen_at, enrolled_at)) AS at FROM machines"),
   ]);
-  const cursor = [runs.results[0]?.at ?? 0, version.results[0]?.value_json ?? "0", machines.results[0]?.at ?? 0].join(".");
+  const version = Object.fromEntries(versions.results.map((row) => [row.key, row.value_json]));
+  const cursor = [runs.results[0]?.at ?? 0, version.jobs_version ?? "0", machines.results[0]?.at ?? 0, version.machines_version ?? "0"].join(".");
   if (url.searchParams.get("since") === cursor) return empty(204);
   return json(200, { cursor });
 }

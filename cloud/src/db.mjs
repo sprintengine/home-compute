@@ -192,3 +192,37 @@ export async function openRuns(db, jobId) {
     active: results.find((run) => run.state !== "due") ?? null,
   };
 }
+
+// ---------- Machines
+
+/**
+ * `machines_version` goes up when the dashboard or an enrolment changes a
+ * machine, so GET /v1/changes notices a drain or a rename (an agent's sync
+ * moves `last_seen_at`, which the cursor already reads).
+ */
+export function bumpMachinesVersion(db) {
+  return db.prepare(`INSERT INTO settings (key, value_json) VALUES ('machines_version', '1')
+    ON CONFLICT(key) DO UPDATE SET value_json = CAST(CAST(value_json AS INTEGER) + 1 AS TEXT)`);
+}
+
+/** A `machines` row as an object, without its credential hashes. */
+export function machineFromRow(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    labels: parse(row.labels_json, {}) ?? {},
+    capabilities: row.capabilities ? String(row.capabilities).split(",").filter(Boolean) : [],
+    capacity: parse(row.capacity_json, {}) ?? {},
+    facts: parse(row.facts_json, {}) ?? {},
+    health: parse(row.health_json, {}) ?? {},
+    agentVersion: row.agent_version ?? null,
+    drain: row.drain === 1,
+    lastSeenAt: row.last_seen_at ?? null,
+    lastIp: row.last_ip ?? null,
+    clockSkewMs: row.clock_skew_ms ?? null,
+    enrolledAt: row.enrolled_at ?? null,
+    revokedAt: row.revoked_at ?? null,
+    credentialIssuedAt: row.credential_issued_at ?? null,
+    rotateRequestedAt: row.rotate_requested_at ?? null,
+  };
+}

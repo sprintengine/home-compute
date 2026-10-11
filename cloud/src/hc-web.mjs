@@ -8,11 +8,13 @@ import {
   accessSettings, AccessError, allows, csrfTokenFor, identityOf, roleOf, verifyAccessJwt,
 } from "./access.mjs";
 import * as api from "./api.mjs";
+import * as fleet from "./fleet-api.mjs";
 import { readSettings } from "./db.mjs";
 import { errorResponse, HttpError, iso, json, readJson } from "./http.mjs";
 
 const JOB = "([a-z0-9][a-z0-9-]{0,62})";
 const RUN = "(r_[0-9A-Za-z]{26})";
+const MACHINE = "(m_[0-9A-Za-z]{26})";
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /** [method, path pattern, role needed, handler]. Mutating routes are everything but GET. */
@@ -30,6 +32,14 @@ const ROUTES = [
   ["GET", `/v1/jobs/${JOB}/runs`, "viewer", api.listRuns],
   ["GET", `/v1/runs/${RUN}`, "viewer", api.getRun],
   ["GET", `/v1/runs/${RUN}/logs`, "viewer", api.runLogs],
+  ["POST", `/v1/runs/${RUN}/cancel`, "operator", api.cancelRun],
+  ["POST", `/v1/runs/${RUN}/retry`, "operator", api.retryRun],
+  ["GET", "/v1/machines", "viewer", fleet.listMachines],
+  ["GET", `/v1/machines/${MACHINE}`, "viewer", fleet.getMachine],
+  // Drain is an operator's; anything else in the body needs an admin (checked in the handler).
+  ["PATCH", `/v1/machines/${MACHINE}`, "operator", fleet.patchMachine],
+  ["DELETE", `/v1/machines/${MACHINE}`, "admin", fleet.revokeMachine],
+  ["POST", "/v1/join-tokens", "admin", fleet.createJoinToken],
   ["POST", "/v1/pause-all", "operator", (context) => api.patchSettings(context, { globalPause: true })],
   ["POST", "/v1/resume-all", "operator", (context) => api.patchSettings(context, { globalPause: false })],
   ["GET", "/v1/settings", "admin", api.getSettings],

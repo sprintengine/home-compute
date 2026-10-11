@@ -1,10 +1,12 @@
 // hc-core's minute: create due runs from every job's schedule (§3.2), mark
 // runs whose agent went quiet as lost, time out runs the agent never reported
 // (§3.6), and, once an hour, apply retention (§12). Every step is idempotent:
-// a second cron in the same minute, or a sync materialising lazily (M2),
-// finds the work done.
+// a second cron in the same minute, or a sync materialising lazily, finds
+// the work done.
 
 import { newId } from "../../src/core/ids.mjs";
+import { preferredUntil } from "../../src/core/placement.mjs";
+import { lostRetry } from "../../src/core/run.mjs";
 import { materialise } from "../../src/core/schedule.mjs";
 import { ACTIVE_SQL, NON_TERMINAL_SQL } from "./db.mjs";
 
@@ -117,13 +119,47 @@ export async function materialiseAll(db, now, { jobIds } = {}) {
 }
 
 /**
- * Runs whose lease ran out become `lost` (§3.4). Creating their retry and
- * telling the agent to stop belong to the agent protocol (M2); until an agent
- * exists, no run is ever claimed, so this finds nothing.
+ * Runs whose lease ran out become `lost` (§3.4): their machine stopped
+ * syncing. `updated_at` then records when, which the retry's grace counts from.
  */
 export async function expireLeases(db, now) {
   const result = await db.prepare(`UPDATE runs SET state = 'lost', lease_expires_at = NULL, updated_at = ?1
     WHERE state IN (${ACTIVE_SQL}) AND lease_expires_at IS NOT NULL AND lease_expires_at < ?1`).bind(now).run();
+  return result.meta.changes;
+}
+
+const LOST_LOOKBACK_MS = 2 * DAY;
+
+/**
+ * Automatic retries of lost runs (§3.4, `lostRetry`): a new due run with
+ * `attempt + 1` and `retry_of`. A lost run already followed by a newer run of
+ * its job (its retry, a later slot or a manual run) needs none: under
+ * coalescing that run does the work. A late completion settles the lost run
+ * instead (it is no longer `lost`), so no retry follows it either.
+ */
+export async function retryLostRuns(db, now) {
+  const { results } = await db.prepare(`SELECT l.id, l.job_id, l.attempt, l.started_at, l.updated_at, j.policy_json, j.placement_json
+    FROM runs l JOIN jobs j ON j.id = l.job_id
+    WHERE l.state = 'lost' AND l.updated_at > ?1
+      AND NOT EXISTS (SELECT 1 FROM runs n WHERE n.job_id = l.job_id AND n.due_at > l.due_at AND n.state != 'skipped')
+    LIMIT 50`).bind(now - LOST_LOOKBACK_MS).all();
+  const retries = [];
+  for (const lost of results) {
+    const policy = parse(lost.policy_json, {});
+    const decision = lostRetry({ attempt: lost.attempt, startedAt: lost.started_at, lostAt: lost.updated_at }, policy, now);
+    if (!decision.retry) continue;
+    retries.push({
+      id: newId("r", now), retry_of: lost.id,
+      preferred_until: preferredUntil({ placement: parse(lost.placement_json, {}) }, now),
+    });
+  }
+  if (!retries.length) return 0;
+  const result = await db.prepare(`INSERT INTO runs (id, job_id, job_revision, slot_at, source, state, attempt, retry_of, due_at,
+      preferred_until, parameters_json, requested_by, created_at, updated_at)
+    SELECT value->>'id', l.job_id, l.job_revision, NULL, 'retry', 'due', l.attempt + 1, l.id, ?1, value->>'preferred_until',
+      l.parameters_json, 'retry', ?1, ?1
+    FROM json_each(?2) JOIN runs l ON l.id = value->>'retry_of' WHERE l.state = 'lost'
+    ON CONFLICT DO NOTHING`).bind(now, JSON.stringify(retries)).run();
   return result.meta.changes;
 }
 
@@ -168,6 +204,7 @@ export async function minute(env, now) {
   const db = env.DB;
   const summary = { materialised: await materialiseAll(db, now) };
   summary.lost = await expireLeases(db, now);
+  summary.retried = await retryLostRuns(db, now);
   summary.timedOut = await timeOutRuns(db, now);
   if (new Date(now).getUTCMinutes() === RETENTION_MINUTE) {
     const settings = await db.prepare("SELECT value_json FROM settings WHERE key = 'retention'").first();

@@ -4,11 +4,15 @@
 // `machine`, `revision`…) are additions; `nodes` aliases `machines`.
 
 import { summarizeRun } from "../../src/core/history.mjs";
+import { claimBlockers, labelsMatch, machineAvailable, unhealthyReason } from "../../src/core/placement.mjs";
+import { OFFLINE_MS } from "../../src/core/protocol.mjs";
 import { upcomingAt } from "../../src/core/schedule.mjs";
 import { iso } from "./http.mjs";
-import { jobFromRow, NON_TERMINAL_SQL, runFromRow } from "./db.mjs";
+import { jobFromRow, machineFromRow, NON_TERMINAL_SQL, runFromRow } from "./db.mjs";
 
 const RECENT_RUNS = 5;
+const RECENT_RUNS_ALL = 20;
+const CLOCK_SKEW_WARNING_MS = 30_000;
 /** Hosted states in the local controller's (Bacalhau's) words, which existing clients understand. */
 const CLIENT_STATE = {
   due: "Queued", claimed: "Pending", "starting-vm": "Pending", pulling: "Pending", running: "Running", reporting: "Running",
@@ -29,7 +33,7 @@ function between(from, to) {
 }
 
 /** A run as clients see it: the local controller's history fields plus the hosted ones. */
-export function clientRun(row) {
+export function clientRun(row, machineNames = null) {
   const run = runFromRow(row);
   const metrics = run.metrics ?? undefined;
   const peakMemoryMb = run.peakMemoryBytes ? Math.round(run.peakMemoryBytes / 1048576) : undefined;
@@ -54,6 +58,7 @@ export function clientRun(row) {
     failureDetail: run.errorDetail ?? undefined,
     skipReason: run.skipReason ?? undefined,
     machine: run.machineId ?? undefined,
+    machineName: run.machineId ? machineNames?.get(run.machineId) : undefined,
     parameters: run.parameters ?? undefined,
     metrics: metrics || peakMemoryMb ? { ...(peakMemoryMb ? { peakMemoryMb } : {}), ...(metrics ?? {}) } : undefined,
     published: run.published ?? undefined,
@@ -71,22 +76,75 @@ function clientSchedule(schedule) {
   return schedule.at ? { at: schedule.at, timezone: "UTC" } : schedule;
 }
 
-function machineView(row, now) {
-  const lastSeen = row.last_seen_at ?? null;
-  const online = lastSeen !== null && now - lastSeen < 90_000;
-  const parse = (text) => { try { return JSON.parse(text ?? "{}"); } catch { return {}; } };
+/**
+ * A machine as clients see it: its status (online, offline, draining,
+ * unhealthy or revoked), VM, caps, labels, agent, clock skew and current
+ * runs. `runs` are run rows; those this machine holds are listed.
+ */
+export function machineView(row, now, runs = []) {
+  const machine = machineFromRow(row);
+  const online = machine.lastSeenAt !== null && now - machine.lastSeenAt <= OFFLINE_MS;
+  const unhealthy = unhealthyReason(machine.health);
+  let status = "online";
+  if (machine.revokedAt) status = "revoked";
+  else if (!online) status = "offline";
+  else if (machine.drain || machine.health.localDrain) status = "draining";
+  else if (unhealthy) status = "unhealthy";
+  const { vm = null, free = null, ...facts } = machine.facts;
   return {
-    id: row.id,
-    name: row.name,
-    status: row.drain ? "draining" : online ? "online" : "offline",
-    labels: parse(row.labels_json),
-    capabilities: row.capabilities ? row.capabilities.split(",").filter(Boolean) : [],
-    capacity: parse(row.capacity_json),
-    health: parse(row.health_json),
-    agentVersion: row.agent_version ?? null,
-    drain: row.drain === 1,
-    lastSeenAt: iso(lastSeen),
+    id: machine.id,
+    name: machine.name,
+    status,
+    ...(unhealthy ? { unhealthy } : {}),
+    labels: machine.labels,
+    capabilities: machine.capabilities,
+    capacity: machine.capacity,
+    vm,
+    free,
+    facts,
+    health: machine.health,
+    agentVersion: machine.agentVersion,
+    drain: machine.drain,
+    localDrain: Boolean(machine.health.localDrain),
+    lastSeenAt: iso(machine.lastSeenAt),
+    lastIp: machine.lastIp,
+    clockSkewMs: machine.clockSkewMs,
+    ...(Math.abs(machine.clockSkewMs ?? 0) > CLOCK_SKEW_WARNING_MS ? { clockSkewWarning: true } : {}),
+    enrolledAt: iso(machine.enrolledAt),
+    ...(machine.revokedAt ? { revokedAt: iso(machine.revokedAt) } : {}),
+    credentialIssuedAt: iso(machine.credentialIssuedAt),
+    rotationPending: Boolean(row.rotation_pending) || machine.rotateRequestedAt !== null,
+    currentRuns: runs.filter((run) => run.machine_id === machine.id).map((run) => ({ id: run.id, job: run.job_id, phase: run.state })),
   };
+}
+
+function minutes(ms) {
+  return `${Math.max(0, Math.round(ms / 60_000))} min`;
+}
+
+/**
+ * Why a due run is still waiting (§3.5: "waiting 12 min: preferred mac-mini
+ * busy"), from the same rules hc-core claims by.
+ */
+export function waitingReason(job, run, machines, now, { globalPause }) {
+  const waited = `waiting ${minutes(now - run.due_at)}`;
+  const blockers = claimBlockers(job);
+  if (blockers.length) return `blocked: ${blockers.join("; ")}`;
+  if (run.source !== "manual" && (job.paused || globalPause || !job.enabled)) return `${waited}: paused`;
+  const required = job.placement?.requireLabels ?? {};
+  const matching = machines.filter((machine) => !machine.revokedAt && labelsMatch(required, machine.labels));
+  if (!matching.length) {
+    const labels = Object.entries(required).map(([key, value]) => `${key}=${value}`).join(", ");
+    return `${waited}: no machine has ${labels ? `labels ${labels}` : "enrolled"}`;
+  }
+  const preferred = job.placement?.preferMachines ?? [];
+  const available = matching.filter((machine) => machineAvailable(machine, now));
+  if (preferred.length && run.preferred_until && now < run.preferred_until) {
+    const waitingFor = available.filter((machine) => preferred.includes(machine.name));
+    if (waitingFor.length) return `${waited}: preferred ${waitingFor.map((machine) => machine.name).join(", ")} busy`;
+  }
+  if (!available.length) return `${waited}: no machine online`;
+  return `${waited}: no machine has ${job.resources.cpus} CPU and ${job.resources.memoryMiB} MiB free`;
 }
 
 /**
@@ -95,15 +153,21 @@ function machineView(row, now) {
  * a UNION ALL per job would hit D1's limit on compound SELECTs.
  */
 export async function buildSnapshot(db, now) {
-  const [jobs, open, settings, machines, recentRows] = await db.batch([
+  const [jobs, open, settings, machines, recentRows, lastReportRows, latestRows] = await db.batch([
     db.prepare(`SELECT j.*, s.last_slot_at, s.last_finished_at, s.published_json AS state_published_json
       FROM jobs j LEFT JOIN schedule_state s ON s.job_id = j.id ORDER BY j.id`),
     db.prepare(`SELECT ${RUN_LIST_COLUMNS} FROM runs WHERE state IN (${NON_TERMINAL_SQL})`),
     db.prepare("SELECT key, value_json FROM settings WHERE key IN ('global_pause', 'jobs_version')"),
-    db.prepare(`SELECT id, name, labels_json, capabilities, capacity_json, health_json, agent_version, drain, last_seen_at
+    db.prepare(`SELECT id, name, labels_json, capabilities, capacity_json, facts_json, health_json, agent_version, drain, last_seen_at,
+        last_ip, clock_skew_ms, enrolled_at, revoked_at, credential_issued_at, rotate_requested_at,
+        credential_next_hash IS NOT NULL AS rotation_pending
       FROM machines WHERE revoked_at IS NULL ORDER BY name`),
     db.prepare(`SELECT ${RUN_LIST_COLUMNS.replace(/(^|,\s*)(\w+)/g, "$1r.$2")} FROM jobs j JOIN runs r ON r.id IN
       (SELECT id FROM runs WHERE job_id = j.id AND state != 'skipped' ORDER BY due_at DESC LIMIT ${RECENT_RUNS})`),
+    // The reports of each job's last finished run (the local controller's lastReports), via schedule_state.last_run_id.
+    db.prepare("SELECT s.job_id, r.reports_json FROM schedule_state s JOIN runs r ON r.id = s.last_run_id WHERE r.reports_json IS NOT NULL"),
+    // The latest changes across jobs, newest first (runs_by_updated).
+    db.prepare(`SELECT ${RUN_LIST_COLUMNS} FROM runs WHERE state != 'skipped' ORDER BY updated_at DESC LIMIT ${RECENT_RUNS_ALL}`),
   ]);
   const setting = Object.fromEntries(settings.results.map((row) => [row.key, JSON.parse(row.value_json)]));
   const globalPause = setting.global_pause === true;
@@ -114,14 +178,21 @@ export async function buildSnapshot(db, now) {
     else entry.active = row;
     openByJob.set(row.job_id, entry);
   }
+  const machineObjects = machines.results.map(machineFromRow);
+  const names = new Map(machineObjects.map((machine) => [machine.id, machine.name]));
+  const view = (row) => clientRun(row, names);
   const recent = new Map();
   for (const row of recentRows.results) {
     if (!recent.has(row.job_id)) recent.set(row.job_id, []);
-    recent.get(row.job_id).push(clientRun(row));
+    recent.get(row.job_id).push(view(row));
   }
+  const lastReports = new Map(lastReportRows.results.map((row) => [row.job_id, JSON.parse(row.reports_json)]));
+  const jobsById = new Map();
   for (const runs of recent.values()) runs.sort((a, b) => Date.parse(b.submittedAt) - Date.parse(a.submittedAt));
   const jobViews = jobs.results.map((row) => {
     const job = jobFromRow(row);
+    jobsById.set(job.id, job);
+    const blocked = claimBlockers(job);
     const { due, active } = openByJob.get(job.id) ?? {};
     const current = active ?? due;
     const runs = recent.get(job.id) ?? [];
@@ -152,6 +223,8 @@ export async function buildSnapshot(db, now) {
         liveState: CLIENT_STATE[current.state],
         phase: current.state,
         lastSubmittedAt: iso(current.due_at),
+        ...(current.machine_id ? { machine: names.get(current.machine_id) ?? current.machine_id } : {}),
+        ...(current.state === "due" ? { waiting: waitingReason(job, current, machineObjects, now, { globalPause }) } : {}),
       } : runs[0] ? { lastSubmittedAt: runs[0].submittedAt } : {}),
       ...(finished ? {
         lastFinishedJobId: finished.id,
@@ -162,13 +235,20 @@ export async function buildSnapshot(db, now) {
         ...(finished.outcome === "failed" && finished.error ? { lastError: finished.error } : {}),
       } : {}),
       published,
+      ...(lastReports.has(job.id) ? { lastReports: lastReports.get(job.id) } : {}),
+      ...(blocked.length ? { blocked: blocked.join("; ") } : {}),
       nextDueAt: iso(next),
       recentRuns: runs.map(summarizeRun),
       runsUrl: `/v1/jobs/${job.id}/runs`,
     };
     return view;
   });
-  const machineViews = machines.results.map((row) => machineView(row, now));
+  const machineViews = machines.results.map((row) => machineView(row, now, open.results));
+  const activeRuns = open.results.map((row) => {
+    const run = view(row);
+    const job = jobsById.get(row.job_id);
+    return row.state === "due" && job ? { ...run, waiting: waitingReason(job, row, machineObjects, now, { globalPause }) } : run;
+  });
   return {
     version: 1,
     generatedAt: iso(now),
@@ -182,6 +262,8 @@ export async function buildSnapshot(db, now) {
     timetable: { editable: true },
     jobs: jobViews,
     machines: machineViews,
+    activeRuns,
+    recentRuns: latestRows.results.map(view),
     // The local controller's Bacalhau node list, in the shape existing clients decode.
     nodes: machineViews.map((machine) => ({
       ...machine,

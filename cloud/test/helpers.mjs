@@ -6,7 +6,8 @@ import { createExecutionContext, createScheduledController, waitOnExecutionConte
 import { env } from "cloudflare:workers";
 import { vi } from "vitest";
 import { clearAccessKeys } from "../src/access.mjs";
-import core from "../src/hc-core.mjs";
+import core, { handleCore } from "../src/hc-core.mjs";
+import { clearJobCache } from "../src/jobcache.mjs";
 import { handle } from "../src/hc-web.mjs";
 
 export const TEAM = env.ACCESS_TEAM_DOMAIN;
@@ -107,6 +108,53 @@ export async function call(path, { method = "GET", body, identity = OWNER, heade
 export async function resetDatabase() {
   await env.DB.batch(["run_logs", "runs", "schedule_state", "jobs", "machines", "join_tokens", "secrets", "audit_log", "settings"]
     .map((table) => env.DB.prepare(`DELETE FROM ${table}`)));
+  // jobs_version starts again from nothing, so hc-core's cached job set must go too.
+  clearJobCache();
+}
+
+// ---------- hc-core and agents
+
+/** A request to hc-core's agent API, as an agent with `credential` sends it, at `now`. */
+export async function agentCall(path, { credential, body, now, method = "POST", headers = {} } = {}) {
+  const all = { "content-type": "application/json", ...headers };
+  if (credential) all.authorization = `Bearer ${credential}`;
+  const request = new Request(`https://core.example.com${path}`, {
+    method,
+    headers: all,
+    body: method === "GET" ? undefined : typeof body === "string" ? body : JSON.stringify(body ?? {}),
+  });
+  const response = await handleCore(request, env, now === undefined ? {} : { now });
+  const text = await response.text();
+  let parsed = null;
+  try { parsed = text ? JSON.parse(text) : null; } catch { /* not JSON */ }
+  return { status: response.status, body: parsed, headers: response.headers };
+}
+
+/** A join token from hc-web (as the owner), then an enrolment with it: `{machineId, credential, …}`. */
+export async function enrolMachine(name, { labels = {}, facts = { os: "linux", arch: "arm64", runtime: "fake" }, now, capabilities } = {}) {
+  const token = await call("/v1/join-tokens", { method: "POST", body: { name, labels, ...(capabilities ? { capabilities } : {}) }, now });
+  if (token.status !== 201) throw new Error(`join token: ${token.status} ${JSON.stringify(token.body)}`);
+  const enrolled = await agentCall("/agent/v1/enrol", { body: { protocol: 1, joinToken: token.body.token, facts }, now });
+  if (enrolled.status !== 201) throw new Error(`enrol: ${enrolled.status} ${JSON.stringify(enrolled.body)}`);
+  return enrolled.body;
+}
+
+/** A sync body: an idle machine with room for two runs, asking for work. */
+export function syncBody(overrides = {}) {
+  return {
+    protocol: 1,
+    agentVersion: "0.2.0",
+    agentTime: overrides.agentTime ?? null,
+    machine: { drain: false, vm: { kind: "fake", state: "running" }, free: { cpus: 4, memoryMiB: 6144, diskMiB: 40_000, runs: 2 }, health: { docker: "ok" } },
+    runs: [],
+    claim: true,
+    ...overrides,
+  };
+}
+
+/** One sync of `machine` (from enrolMachine) at `now`. */
+export async function syncAs(machine, now, overrides = {}) {
+  return agentCall("/agent/v1/sync", { credential: machine.credential, body: syncBody(overrides), now });
 }
 
 /** Runs hc-core's scheduled handler as the cron would, at `time` (epoch ms or ISO). */
