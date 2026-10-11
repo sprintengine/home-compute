@@ -80,11 +80,14 @@ export class DashboardAuth {
     return LOOPBACK_NAMES.has(name) || name.endsWith(".ts.net") || this.hosts.has(name);
   }
 
-  /** Reached over HTTPS through a local proxy such as `tailscale serve`. */
+  /**
+   * Reached over HTTPS through a local proxy such as `tailscale serve`, which
+   * says so in X-Forwarded-Proto. Without that, a Secure cookie could be one
+   * the browser never stores (plain `tailscale serve --http`), so it is not.
+   */
   isHttps(request) {
     if (!this.isLoopbackPeer(request) || !this.isProxied(request)) return false;
-    const proto = header(request, "x-forwarded-proto");
-    return proto ? proto.split(",")[0].trim() === "https" : hostnameOf(header(request, "host")).endsWith(".ts.net");
+    return String(header(request, "x-forwarded-proto") ?? "").split(",")[0].trim() === "https";
   }
 
   /** The tailnet login `tailscale serve` attached, when it may be believed at all. */

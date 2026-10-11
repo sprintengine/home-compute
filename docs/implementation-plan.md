@@ -61,11 +61,14 @@ request, and a schedule. Wingfoil is one such image, not a built-in job type.
 ### 4. Operational hardening
 
 - Add job history and log links without duplicating Bacalhau's history store.
+  Done: a bounded per-job run history, log tails and a dashboard served over
+  `tailscale serve` ([dashboard.md](dashboard.md)).
 - Add exponential backoff and an explicit retry policy to logical jobs.
 - Move long-lived workload secrets to a secret provider or publication step.
 - Add HTTPS guidance and scoped API tokens before exposing the controller beyond
   loopback or a trusted private network.
-- Add configuration reload and a schema/version migration policy.
+- Add configuration reload and a schema/version migration policy. Jobs now
+  reload in place (`POST /v1/reload`, SIGHUP); other sections still need a restart.
 
 ### 5. Community release and marketplace
 
