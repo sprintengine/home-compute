@@ -91,6 +91,12 @@ npm test --workspace @home-compute/cloud
   Worker is bundled from `test-node/support/core-under-test.mjs`, a test-only
   entry that takes the time from an `x-hc-test-now` header; the deployed
   Worker never reads it.
+- `test-node/docker-integration.test.mjs` (M3) drives hc-core with a real
+  agent on a real Docker and the fixture image of `agent/test/fixture`: the
+  secret it prints is stored `<redacted>`, with its report, metrics and
+  digest. It is skipped without a test Docker (see the agent's README: on
+  Linux the local socket; on a Mac only an explicit `HC_TEST_DOCKER_HOST`,
+  e.g. through `agent/scripts/with-test-colima.sh`). CI requires it.
 - `test-node/local-worker.test.mjs` runs hc-web under `wrangler dev` and drives
   it with `home-compute cloud import`, as above.
 - `test-node/cpu.test.mjs` estimates CPU per request on the hot paths.
@@ -137,7 +143,7 @@ Answers are `Cache-Control: no-store`.
 | Request | Body limit | What it does |
 | --- | --- | --- |
 | `POST /agent/v1/enrol` | 16 KB | `{protocol, joinToken, name?, facts}` → 201 `{machineId, credential, name, labels, capabilities}`. The token is single use and expires (60 minutes by default); its name, labels and capabilities win over the agent's. 401 `invalid_join_token` / `join_token_used` / `join_token_expired`, 409 for a name in use. |
-| `POST /agent/v1/sync` | 128 KB | §4.2: heartbeat, run progress and claim in one. Answers `{serverTime, nextSyncInMs, claims, cancel, upcoming, config, update: null, provisioningTasks: [], rotateCredential}`. |
+| `POST /agent/v1/sync` | 128 KB | §4.2: heartbeat, run progress and claim in one. Answers `{serverTime, nextSyncInMs, claims, cancel, upcoming, config, update: null, provisioningTasks: [], rotateCredential}`. An `upcoming` slot another machine is preferred for says `preferredElsewhere: true` (the agent does not pre-warm its VM for it). |
 | `POST /agent/v1/runs/:id/complete` | 256 KB | The final record. Idempotent; a lost run's late record settles it with `recovered`. |
 | `POST /agent/v1/provisioning/:id/events` | | 501 until M6. |
 

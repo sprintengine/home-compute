@@ -10,6 +10,9 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # ubuntu-latest has Docker: the agent's real-Docker tests (§11 M3) must run, not skip.
+      HC_REQUIRE_DOCKER_TESTS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -17,6 +20,7 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: docker version
       - run: npm run check
       - run: npm run build:studio
       - run: npm test --workspace @home-compute/cloud

@@ -5,7 +5,7 @@
 // gives per image; the test can also print lines, finish them, change their
 // stats, or break their log stream.
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -332,6 +332,7 @@ export async function startFakeDocker(t, { colimaDir = null, profile = null, soc
 /** A directory for the fake colima's state. */
 export async function fakeColimaDir(t) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "hcc-"));
+  await writeFile(path.join(dir, ".fake-colima"), "");
   t?.after?.(() => rm(dir, { recursive: true, force: true }));
   return dir;
 }

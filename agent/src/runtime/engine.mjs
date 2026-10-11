@@ -136,6 +136,8 @@ export class Engine {
 export function sampleFromStats(raw, { previous = null, startedAt = null, now = Date.now() } = {}) {
   if (!raw || typeof raw !== "object") return null;
   const memory = raw.memory_stats ?? {};
+  // A container that has stopped answers with empty memory figures and zero CPU: not a sample.
+  if (typeof memory.usage !== "number" && !raw.cpu_stats?.cpu_usage?.total_usage) return null;
   const counters = memory.stats ?? {};
   const inactive = counters.inactive_file ?? counters.total_inactive_file ?? 0;
   const memoryBytes = typeof memory.usage === "number" ? Math.max(0, Math.round(memory.usage - inactive)) : null;

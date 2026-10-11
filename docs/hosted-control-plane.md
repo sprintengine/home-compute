@@ -529,6 +529,22 @@ the boundary. Inside it, `--cpu-shares` only orders containers against each othe
 QoS of the VZ process (`taskpolicy`) is an open question (§12): Apple's background QoS confines
 work to E-cores and may push imports past their timeouts.
 
+*As built (M3):* `agent/src/runtime/docker-cli.mjs` and `colima.mjs`. The `docker run` argv
+is exactly the one above (plus `--cgroup-parent` when `docker.cgroupParent` is set, and
+`--entrypoint FIRST IMAGE REST… ARGS…` for an entrypoint list); nothing can add a privilege,
+mount, device or host namespace, and a spec that *asks* for one (`privileged`, `volumes`,
+`mounts`, `devices`, `capAdd`, `pid`, `network: host`, …) is refused rather than run without
+it. Secret names the `docker` process reads itself (`DOCKER_*`, `PATH`, `HOME`, …) are
+refused. `allowImages` is **empty by default** (nothing runs until the owner lists patterns;
+`doctor` fails), `local:` images need `allowLocalImages`. The Engine API is reached only over
+a unix socket. Interface additions, all optional for callers: `imageDigest(ref)`,
+`released(runId)`, `setContext()`/`tick()` (the VM lifecycle, below), `selfTest()` (doctor),
+and on handles `secretValues(names)` and `detach()`. `idle()` prunes images; `stop()` stops the
+VM. A limitation to know: Docker keeps a container's environment, secret values included, in
+its own state (inside the VM for Colima) until the container is removed, which the agent does
+as soon as the result is in the outbox. After an agent restart the delivered values are read
+back from there (`docker inspect`, kept in memory) so the replayed log is still redacted.
+
 ### 4.4 Colima on demand, right-sized
 
 The agent uses its own profile, `home-compute`, so it never fights the owner's `default` profile
@@ -554,6 +570,27 @@ The agent uses its own profile, `home-compute`, so it never fights the owner's `
   to this machine and the dashboard shows the last `colima` error.
 - **Sleep**: while a run is active the agent holds `caffeinate -i -w <pid>`.
 
+*As built (M3):* the start command is `colima start <profile> --runtime docker --vm-type vz
+--cpus C --memory M --disk D --activate=false --ssh-config=false --mount none` (Colima 0.10
+calls it `--cpus`; `--activate=false` leaves the current docker context alone, `--mount none`
+shows the VM none of the owner's files). The boot time is measured from `colima start` until
+Docker answers, kept in `vm.json` and reported as `health.vmBootSeconds`. `upcoming` entries
+carry `preferredElsewhere: true` for a slot another machine is preferred for; those neither
+pre-warm nor size the VM. A smaller size is applied only when it frees at least 1 GiB and the
+restart ends before the next slot, and a VM already as large as the cap allows is never
+restarted for a run the formula wants larger. The minimum (2 CPU, 2 GiB) is configurable
+(`colima.minCpus`, `colima.minMemoryMiB`). `idleStopSeconds`/`keepWarmSeconds` come from the
+sync's `config` unless the machine sets its own. A failed start is followed by
+`colima stop --force`; failed pre-warms count toward the three failures, and while the machine
+is gated only the 5-minute probe starts the VM. After an agent restart a stopped VM is started
+only when run records expect containers in it. While containers run, the agent offers the
+control plane only what fits beside them (VM memory less 0.75 GiB less what runs).
+Measured on the owner's Mac with a 1 CPU / 1 GiB profile (`agent/scripts/acceptance-colima.sh`
+and probes, 2026-10-11): creating the profile 13.7–28.8 s, starting a stopped one 9.5–19.4 s,
+stopping it about 3 s; the `com.apple.Virtualization.VirtualMachine` process's footprint was
+about 750 MB just after boot and up to about 980 MB (RSS 1.1–1.3 GiB) while running a job that
+held 200 MiB. A VM's memory is not given back while it runs, so the idle stop is what frees it.
+
 What this saves with Wingfoil's **current** timetable (every enabled job at 0.5–1 GiB; hourly
 slots at :05 blend, :10 prune, :15 forecast-archive (+ sea-temperature, mi-swan), :50 wind-obs):
 the VM boots at about :04, idles to about :22, boots again at :49 and stops at about :56. That is
@@ -571,6 +608,17 @@ These are estimates; the dashboard measures `vm_wait_ms` and VM uptime per machi
   with the claim and used via `docker login --password-stdin` for that pull only.
 - `local:` images (e.g. `wingfoil-forecast:local`) are for single-machine development. The job
   must require that machine's label.
+
+*As built (M3):* a pinned digest is pulled only when Docker lacks it; a registry **tag** is
+pulled every time (nothing is downloaded when it is current), and when the registry cannot be
+reached the copy already present runs; a local image is never pulled. The recorded digest is the
+pinned one, a pulled tag's repository digest, or a local build's image id. Pruning keeps the 3
+most recently *used* digests per repository and only touches images the agent pulled itself
+(`images.json`), never the owner's. The registry secret arrives as `spec.registryAuth`
+(`{server, username, password}`, delivered by M5): `docker login --password-stdin` into a
+throwaway `DOCKER_CONFIG` (0700, under the temp directory), the pull, `docker logout`, and the
+directory deleted, so the credential is on disk only for the length of that pull. It is
+redacted like the other secrets and never written to the run record.
 
 ### 4.6 Logs, errors, reports, stats
 
@@ -595,6 +643,16 @@ These are estimates; the dashboard measures `vm_wait_ms` and VM uptime per machi
   (the dashboard shows "too short to sample"). Workloads may also report `peak*` fields, such as
   `peakRssBytes` from `getrusage(RUSAGE_CHILDREN)`. `reportMetrics` already takes their maximum,
   and the dashboard prefers them when present.
+- *As built (M3):* stats are one-shot Engine API samples (`stream=false&one-shot=true`), so CPU %
+  is the share of one CPU since the previous sample (the first: since the container started);
+  an answer from a container that already stopped (empty memory, zero CPU) is not a sample, and
+  `cpu_seconds` is the largest total seen. `docker logs -f --timestamps` lines lose their
+  timestamp, a line rewritten with `\r` keeps its last state, stderr counts, and a stream that
+  breaks while the container runs is reattached with `--since` the last timestamp, without
+  repeats; lines without a timestamp are the CLI's own and go to the agent's log, not the run's.
+  The workload's `peak*` fields stay in its reports and metrics; `peak_memory_bytes` is always
+  the sampled figure (the dashboard prefers the workload's, M4). Peak memory was measured at
+  337 MB for a container holding 320 MiB, on real Docker.
 
 ### 4.7 Service, self-update, offline
 
@@ -613,6 +671,13 @@ These are estimates; the dashboard measures `vm_wait_ms` and VM uptime per machi
   on macOS; on Linux `/etc/home-compute` for root or when it exists and is writable (the systemd
   install), else `~/.local/state/home-compute`; `--state-dir`/`HC_AGENT_STATE_DIR` override it.
   The agent does not yet call `idle()`/`stop()` on its runtime: the VM lifecycle of §4.4 is M3.
+- *As built (M3):* templates in `agent/service/`: `home-compute-agent.service` (`User=hcagent`,
+  `SupplementaryGroups=docker`, `Nice=10`, `Restart=always`, light hardening),
+  `home-compute.slice` (`CPUWeight=20`, `MemoryMax=@MEMORY_MAX@` for the installer to fill in;
+  containers join it through `docker.cgroupParent`), and `dev.homecompute.agent.plist`
+  (`KeepAlive`, a Homebrew PATH, `AbandonProcessGroup` so the VM outlives an agent restart,
+  `ProcessType` Standard, not Background, which would lower the VM's QoS). Whether a
+  LaunchDaemon with `UserName` can run the VZ VM is still untested (risk 5).
 - **Self-update**: `update` in a sync gives `{version, url, sha256, signature}`. The agent verifies
   an **ed25519 signature against a public key compiled into the agent**, so even a compromised
   control plane cannot push code. It applies the update only when no runs are active: write
@@ -903,7 +968,7 @@ assistance, in focused days.
 | M0 | **Core extraction** | `src/core/{job,schedule,reports,history,redact,logs}.mjs` with no `node:` imports; old code imports from it; `feature/dashboard` merged first | Existing `node --test` suite passes unchanged; new tests for `materialise()` (coalesce/skip/catch-up/pause, `every` anchoring) and `transition(run, event)` | 2 d |
 | M1 | **Control plane skeleton** | `cloud/` workspace: `wrangler.web.jsonc` + `wrangler.core.jsonc`, `migrations/0001_init.sql`, cron materialisation, job CRUD, `/v1/snapshot`, `cloud import` (dry-run diff), deployed in **shadow mode** | `@cloudflare/vitest-pool-workers` (workerd + local D1, migrations applied): cron twice in one minute → one run; coalescing; pause; import idempotency; Access JWT checks against a test JWKS; CSRF refusals | 5 d |
 | M2 | **Agent MVP (fake runtime)** | Enrol, sync, claim, leases, lost/retry, complete, outbox, adopt-on-restart | Integration in `node --test`: Miniflare/`unstable_dev` hosting `hc-core` + agent with `FakeRuntime` and a fake clock. Two agents race for one run → one winner; agent killed mid-run → `lost` → retry; late complete → `recovered`; offline control plane → outbox drains later. *Built: `cloud/test-node/agent-integration.test.mjs` (Miniflare, a clock both sides share).* | 5 d |
-| M3 | **Docker + Colima runtime** | `DockerCliRuntime`, `ColimaRuntime` (pre-warm, size, idle stop), stats, OOM/timeout, redaction, policy (`allowImages`) | CI (ubuntu-latest has Docker): a fixture image that prints json-lines, echoes a secret (must be `<redacted>` server-side), allocates 300 MB (peak ≥ 300 MB), OOMs at `--memory 64m`, sleeps past `runSeconds`. Colima: unit tests against a fake `colima` binary (the `macos/dev/fake-setup.sh` pattern) for start/resize/stop decisions; a manual acceptance script on the Mac mini (GitHub's macOS runners cannot run nested VMs) | 6 d |
+| M3 | **Docker + Colima runtime** | `DockerCliRuntime`, `ColimaRuntime` (pre-warm, size, idle stop), stats, OOM/timeout, redaction, policy (`allowImages`) | CI (ubuntu-latest has Docker): a fixture image that prints json-lines, echoes a secret (must be `<redacted>` server-side), allocates 300 MB (peak ≥ 300 MB), OOMs at `--memory 64m`, sleeps past `runSeconds`. Colima: unit tests against a fake `colima` binary (the `macos/dev/fake-setup.sh` pattern) for start/resize/stop decisions; a manual acceptance script on the Mac mini (GitHub's macOS runners cannot run nested VMs). *Built: fake `docker`/`colima`/`caffeinate` binaries on PATH (`agent/test/fake-bin/`) with a fake Engine on a unix socket; `agent/test/docker-real.test.mjs` and `cloud/test-node/docker-integration.test.mjs` on real Docker (CI requires them; on a Mac they run in a throwaway profile via `agent/scripts/with-test-colima.sh`); `agent/scripts/acceptance-colima.sh`.* | 6 d |
 | M4 | **Hosted dashboard** | Port `feature/dashboard` app to `hc-web` assets; Access sign-in; Machines, Timetable grid, run detail with phases/stats; `/v1/changes` polling | Existing `test/dashboard.test.mjs` approach against the Worker; Playwright smoke at a 390×844 viewport (overview, run now, timetable edit) | 4 d |
 | M5 | **Secrets + Wingfoil cut-over** | Vault (RSA-OAEP envelope, split keys), Wingfoil preset, `import-history`, migration phases 1–4 | Worker tests: no `/v1` response contains a secret value (grep every endpoint's body); claims to non-matching labels get no secrets. Migration checklist per job | 3 d + 1–2 wk soak |
 | M6 | **Provisioning (Linux, then macOS)** | Provisioner capability, `install.sh`, task UI, uninstall | `shellcheck`; `install.sh --dry-run` with stubbed `apt`/`systemctl`/`brew` asserting step order and second-run `skip`; real run against a tailnet Linux VM and a spare Mac (checklist) | 5 d |

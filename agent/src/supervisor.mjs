@@ -173,14 +173,16 @@ export class RunSupervisor {
     const facts = await this.runtime.facts().catch(() => null);
     if (facts?.vm && facts.vm.state !== "running") this.setPhase("starting-vm");
     const vmStarted = this.clock.monotonic();
+    let ready;
     try {
-      await this.runtime.ensureReady({ cpus: this.resources.cpus, memoryMiB: this.resources.memoryMiB });
+      ready = await this.runtime.ensureReady({ cpus: this.resources.cpus, memoryMiB: this.resources.memoryMiB });
       this.events.runtimeReady?.();
     } catch (error) {
       this.events.runtimeError?.(error);
       return this.#finish({ error: `the container runtime is not ready: ${error.message}` });
     }
-    if (this.phase === "starting-vm") this.vmWaitMs = Math.round(this.clock.monotonic() - vmStarted);
+    // A running VM restarted to a new size is a VM wait too, though nobody knew it would be.
+    if (this.phase === "starting-vm" || ready?.bootMs > 0) this.vmWaitMs = Math.round(this.clock.monotonic() - vmStarted);
     if (this.cancelRequested) return this.#finish({ cancelled: true });
     if (this.aborted) return null;
 
@@ -320,7 +322,8 @@ export class RunSupervisor {
       stats.peakCpuPct = Math.max(stats.peakCpuPct ?? 0, sample.cpuPct);
       stats.cpuSum += sample.cpuPct;
     }
-    if (typeof sample.cpuSeconds === "number") stats.cpuSeconds = sample.cpuSeconds;
+    // Cumulative: the largest is the latest that counted.
+    if (typeof sample.cpuSeconds === "number") stats.cpuSeconds = Math.max(stats.cpuSeconds ?? 0, sample.cpuSeconds);
     stats.samples += 1;
   }
 

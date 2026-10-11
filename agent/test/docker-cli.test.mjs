@@ -129,6 +129,7 @@ test("stats: memory is usage − inactive_file, CPU is a share of one CPU betwee
   assert.deepEqual([second.memoryBytes, second.cpuPct, second.cpuSeconds], [500e6, 100, 5]);
   const v1 = sampleFromStats({ memory_stats: { usage: 10, stats: { total_inactive_file: 4 } } });
   assert.equal(v1.memoryBytes, 6);
+  assert.equal(sampleFromStats({ memory_stats: {}, cpu_stats: { cpu_usage: { total_usage: 0 } } }), null, "a stopped container's empty answer is no sample");
 
   const { fake, runtime } = await setup(t);
   const image = spec().image;

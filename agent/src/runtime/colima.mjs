@@ -232,7 +232,9 @@ export class ColimaRuntime {
       const desired = this.desiredSize();
       const held = this.heldMiB();
       if (vm.state === "running") {
-        if (vmFits(vm, required, held)) {
+        // As big as the run needs, or as big as the cap allows: a restart would give it nothing more.
+        const target = sizeFor(desired, required, held, this.caps);
+        if (vmFits(vm, required, held) || (vm.cpus >= target.cpus && vm.memoryMiB >= target.memoryMiB)) {
           await this.docker.ensureReady();
           return { bootMs: 0 };
         }

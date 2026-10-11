@@ -85,6 +85,13 @@ test("a VM too small is resized (stop, then start bigger) only while it holds no
   assert.deepEqual(await runtime.ensureReady({ cpus: 1, memoryMiB: 512 }), { bootMs: 0 }, "a small run fits beside it");
 });
 
+test("a VM already as big as the cap allows is never restarted for a run the formula wants bigger", async (t) => {
+  const { dir, runtime } = await setup(t, { caps: { cpus: 1, memoryMiB: 1024 }, min: { cpus: 1, memoryMiB: 1024 } });
+  await runtime.ensureReady({ cpus: 1, memoryMiB: 512 });
+  assert.deepEqual(await runtime.ensureReady({ cpus: 1, memoryMiB: 512 }), { bootMs: 0 });
+  assert.deepEqual((await colimaCalls(dir)).filter((call) => /^(start|stop)/.test(call)).map((call) => call.split(" ")[0]), ["start"]);
+});
+
 test("tick: pre-warms bootSeconds + 10 s before the first upcoming slot, keeps warm, stops when idle (pruning first)", async (t) => {
   const { dir, runtime } = await setup(t);
   runtime.bootSeconds = 5;
