@@ -3,3 +3,5 @@ CSRF_KEY=local-development-only-csrf-key
 # Stands in for Access on localhost only (a deployed Worker ignores it).
 DEV_ACCESS_EMAIL=you@example.com
 BOOTSTRAP_ADMINS=you@example.com
+# hc-core's local URL, for the enrol command shown with a join token.
+CORE_URL=http://localhost:8788

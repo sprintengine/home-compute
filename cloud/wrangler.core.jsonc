@@ -1,4 +1,5 @@
-// hc-core: the per-minute cron and (from M2) the agent API. It never serves people.
+// hc-core: the agent API (/agent/v1/*) and the per-minute cron. It never serves people,
+// and Access must never be put in front of it: agents authenticate with their own credentials.
 // See README.md for local development and the deploy steps.
 {
   "$schema": "../node_modules/wrangler/config-schema.json",

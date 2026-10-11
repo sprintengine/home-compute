@@ -258,6 +258,11 @@ Notes:
   `local:<NAME>` means "resolve from the agent's own env file". That value never leaves the machine.
 - `jobs_version` in `settings` increases on every job write. Workers keep parsed job
   definitions in isolate memory keyed by it, so a sync reads 1 row instead of about 21.
+- *As built (M2):* migration `0003` adds `machines.credential_issued_at` (rotation by age) and
+  `machines.rotate_requested_at` (rotation asked for from the dashboard). `last_seen_at` is
+  written at most once a **minute**, not every 5 minutes, because §3.5's offline test needs it
+  fresh (see §3.5). `settings.machines_version` moves on dashboard machine edits, so
+  `/v1/changes` notices a drain.
 
 ---
 
@@ -323,6 +328,12 @@ Rules (unchanged from the current controller where it already defines them):
   so about 9 missed syncs before expiry).
 - The server accepts a run update only from the machine that holds it and only in a non-terminal
   state, or in `lost` (a late report).
+- *As built (M2):* a lease is renewed once it is 30 s old rather than on every sync, which
+  writes a running run's row every 30 s instead of every 10 s (a lease then has 60–90 s left
+  when its machine goes quiet). A run claimed for a machine that its next sync does not mention
+  (the answer carrying the claim was lost) is sent again in `claims`. Scheduled and retry runs of
+  a paused or disabled job, or under `global_pause`, are not claimed; **manual runs are**, so
+  phase 1 of §9 can test a run while everything else is paused.
 
 ### 3.4 Lost agents, retry and reassignment
 
@@ -337,6 +348,9 @@ Rules (unchanged from the current controller where it already defines them):
   and reattaches to their logs and stats. A Mac mini reboot during a run then becomes either
   `failed` (container gone, exit unknown, "agent restarted") or a normal completion.
 - `retry.onFailed` (default 0 attempts; the next slot is the retry for scheduled importers) with `backoffSeconds`.
+- *As built (M2):* the time a run became `lost` is its `updated_at` (nothing else touches a lost
+  row), and the grace counts from it. No retry is made when a newer run of the job exists (its
+  retry, a later slot or a manual run): under coalescing that run does the work.
 
 ### 3.5 Queueing and placement
 
@@ -352,6 +366,12 @@ Rules (unchanged from the current controller where it already defines them):
   as "waiting 12 min: preferred mac-mini busy".
 - `drain` (dashboard or menu bar app): claim nothing new and finish current work. Useful when the
   Mac's owner needs the whole machine.
+- *As built (M2):* "offline" is **150 s** without a recorded sync: the 90 s above plus the minute
+  by which `last_seen_at` may lag. A drain set on the machine itself (the agent's status
+  server) is reported in its syncs and shown as `localDrain`, separate from the dashboard's
+  `drain` column; either stops claims. Until the vault exists (M5), a job naming a `vault:`
+  secret is never claimed: the overview shows it as `blocked`, and every waiting run says why
+  it waits (`waiting 12 min: preferred mac-mini busy`).
 
 ### 3.6 Timeouts
 
@@ -440,6 +460,15 @@ POST /agent/v1/sync            Authorization: Bearer hca_m_01J…_<secret>
 - Errors: 5xx, 429 or 1027 lead to exponential backoff with jitter (cap 5 min). Running containers
   continue. 401/403 (revoked) means: claim nothing, finish current runs, keep results in the outbox,
   and show "revoked" in local status. 426 (protocol too old) means self-update.
+- *As built (M2):* `localEnv` entries are `{"name": "AWS_ACCESS_KEY_ID", "from": "WINGFOIL_KEY"}`
+  (the container's name and the agent's env-file name may differ). `secretEnv` is `{}` until M5.
+  A finished run whose result is still in the outbox stays in `runs` as `reporting`, so its lease
+  holds until the result is delivered. The `complete` record also says `cancelled` (the agent
+  stopped it for a cancel) and `failed` (it failed before it had an exit code: a refused image, a
+  failed pull, a missing local secret). A 401 body says `{"code": "revoked"}` or
+  `{"code": "unauthorized"}`; a request sent with the old credential just after a rotation was
+  promoted is retried once with the new one rather than taken as a revocation. The agent's local
+  status server listens on `statusPort` (default 4787).
 
 ### 4.3 Container runtime abstraction
 
@@ -459,6 +488,14 @@ Implementations: `DockerCliRuntime` (Docker Engine on Linux/WSL, Docker Desktop)
 `ColimaRuntime` (wraps `DockerCliRuntime` with `DOCKER_HOST=unix://$HOME/.colima/home-compute/docker.sock`
 and VM management), and `FakeRuntime` (scripted lines, exit codes, memory samples, delays,
 OOM and hangs; used by tests).
+
+*As built (M2):* two optional additions to the interface. `facts().vm` (`{state, cpus,
+memoryMiB}` or null) tells the agent whether a run will wait for a VM, so it reports
+`starting-vm` only then. `handle.remove()` replaces "removed after `inspect`" inside `wait()`:
+the agent removes a container only after the run's result is in the outbox, so a crash between
+the exit and the outbox loses nothing and adoption still finds the exited container. Handles
+also carry `runId`/`jobId` from the labels. An image is "local" when it names no registry host
+(`wingfoil-forecast:local`, `alpine`, `user/app`); those need `allowLocalImages`.
 
 The CLI is used for `pull/run/stop/rm`, so `docker` handles contexts and credential helpers
 (ghcr). The Engine API over the same unix socket is used for `inspect` (exit code, `OOMKilled`)
@@ -568,6 +605,11 @@ These are estimates; the dashboard measures `vm_wait_ms` and VM uptime per machi
   starts without a login. `.wslconfig` caps memory.
 - **Local status**: `127.0.0.1:4787` (read-only, plus `POST /drain`), authenticated by a token in a
   0600 file, for the menu bar app.
+- *As built (M2):* one state directory holds the configuration, credential, `env` (local
+  secrets), status token, outbox and run records: `~/Library/Application Support/home-compute`
+  on macOS; on Linux `/etc/home-compute` for root or when it exists and is writable (the systemd
+  install), else `~/.local/state/home-compute`; `--state-dir`/`HC_AGENT_STATE_DIR` override it.
+  The agent does not yet call `idle()`/`stop()` on its runtime: the VM lifecycle of §4.4 is M3.
 - **Self-update**: `update` in a sync gives `{version, url, sha256, signature}`. The agent verifies
   an **ed25519 signature against a public key compiled into the agent**, so even a compromised
   control plane cannot push code. It applies the update only when no runs are active: write
@@ -857,7 +899,7 @@ assistance, in focused days.
 | --- | --- | --- | --- | --- |
 | M0 | **Core extraction** | `src/core/{job,schedule,reports,history,redact,logs}.mjs` with no `node:` imports; old code imports from it; `feature/dashboard` merged first | Existing `node --test` suite passes unchanged; new tests for `materialise()` (coalesce/skip/catch-up/pause, `every` anchoring) and `transition(run, event)` | 2 d |
 | M1 | **Control plane skeleton** | `cloud/` workspace: `wrangler.web.jsonc` + `wrangler.core.jsonc`, `migrations/0001_init.sql`, cron materialisation, job CRUD, `/v1/snapshot`, `cloud import` (dry-run diff), deployed in **shadow mode** | `@cloudflare/vitest-pool-workers` (workerd + local D1, migrations applied): cron twice in one minute → one run; coalescing; pause; import idempotency; Access JWT checks against a test JWKS; CSRF refusals | 5 d |
-| M2 | **Agent MVP (fake runtime)** | Enrol, sync, claim, leases, lost/retry, complete, outbox, adopt-on-restart | Integration in `node --test`: Miniflare/`unstable_dev` hosting `hc-core` + agent with `FakeRuntime` and a fake clock. Two agents race for one run → one winner; agent killed mid-run → `lost` → retry; late complete → `recovered`; offline control plane → outbox drains later | 5 d |
+| M2 | **Agent MVP (fake runtime)** | Enrol, sync, claim, leases, lost/retry, complete, outbox, adopt-on-restart | Integration in `node --test`: Miniflare/`unstable_dev` hosting `hc-core` + agent with `FakeRuntime` and a fake clock. Two agents race for one run → one winner; agent killed mid-run → `lost` → retry; late complete → `recovered`; offline control plane → outbox drains later. *Built: `cloud/test-node/agent-integration.test.mjs` (Miniflare, a clock both sides share).* | 5 d |
 | M3 | **Docker + Colima runtime** | `DockerCliRuntime`, `ColimaRuntime` (pre-warm, size, idle stop), stats, OOM/timeout, redaction, policy (`allowImages`) | CI (ubuntu-latest has Docker): a fixture image that prints json-lines, echoes a secret (must be `<redacted>` server-side), allocates 300 MB (peak ≥ 300 MB), OOMs at `--memory 64m`, sleeps past `runSeconds`. Colima: unit tests against a fake `colima` binary (the `macos/dev/fake-setup.sh` pattern) for start/resize/stop decisions; a manual acceptance script on the Mac mini (GitHub's macOS runners cannot run nested VMs) | 6 d |
 | M4 | **Hosted dashboard** | Port `feature/dashboard` app to `hc-web` assets; Access sign-in; Machines, Timetable grid, run detail with phases/stats; `/v1/changes` polling | Existing `test/dashboard.test.mjs` approach against the Worker; Playwright smoke at a 390×844 viewport (overview, run now, timetable edit) | 4 d |
 | M5 | **Secrets + Wingfoil cut-over** | Vault (RSA-OAEP envelope, split keys), Wingfoil preset, `import-history`, migration phases 1–4 | Worker tests: no `/v1` response contains a secret value (grep every endpoint's body); claims to non-matching labels get no secrets. Migration checklist per job | 3 d + 1–2 wk soak |

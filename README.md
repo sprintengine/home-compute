@@ -191,12 +191,13 @@ the JSON configuration.
 
 [docs/hosted-control-plane.md](docs/hosted-control-plane.md) designs the
 replacement for Bacalhau and the local daemon: a control plane on Cloudflare's
-free plan and a pull-based agent on each machine. Its first two milestones are
-here: the pure scheduling, report and job code in `src/core` (which this
-controller now uses too), and the two Workers with their D1 schema in
+free plan and a pull-based agent on each machine. Its first three milestones
+are here: the pure scheduling, report and job code in `src/core` (which this
+controller now uses too); the two Workers with their D1 schema in
 [cloud/](cloud/README.md), including `home-compute cloud import` for moving a
-job file across. Nothing changes for the controller described above until the
-agent ships.
+job file across and the agent API; and the agent in [agent/](agent/README.md),
+which so far runs only scripted (fake) containers. Nothing changes for the
+controller described above until the agent drives Docker and Colima (M3).
 
 ## Licence
 

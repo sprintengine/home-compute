@@ -23,7 +23,9 @@
     "ACCESS_TEAM_DOMAIN": "",
     "ACCESS_AUD": "",
     // Comma-separated emails that are admins before any `roles` setting exists.
-    "BOOTSTRAP_ADMINS": ""
+    "BOOTSTRAP_ADMINS": "",
+    // hc-core's URL, shown in the enrol command that comes with a join token.
+    "CORE_URL": ""
   }
   // Secret: CSRF_KEY (wrangler secret put CSRF_KEY -c wrangler.web.jsonc). Locally: .dev.vars.
 }
