@@ -94,6 +94,30 @@ test("the dashboard is served with a strict content security policy", async (con
   assert.equal((await send(port, { path: "/assets/../src/auth.mjs" })).status, 401, "only the listed files are served");
 });
 
+test("every module the dashboard imports, and its service worker, are served, and nothing comes from elsewhere", async (context) => {
+  const { port } = await fixture(context);
+  const directory = path.resolve(import.meta.dirname, "../dashboard");
+  const seen = new Set();
+  const queue = ["app.js"];
+  while (queue.length) {
+    const file = queue.shift();
+    if (seen.has(file)) continue;
+    seen.add(file);
+    const response = await send(port, { path: `/assets/${file}` });
+    assert.equal(response.status, 200, file);
+    assert.match(response.headers["content-type"], /javascript/, file);
+    assert.equal(response.text, await readFile(path.join(directory, file), "utf8"), file);
+    assert.doesNotMatch(response.text, /\bimport\b[^;]*["']https?:/, `${file} imports nothing from elsewhere`);
+    for (const [, imported] of response.text.matchAll(/^\s*(?:import|export)\s[^;]*?from\s+"\.\/([\w-]+\.js)";/gms)) queue.push(imported);
+  }
+  assert.ok(seen.size >= 8, `app.js and its modules: ${[...seen].join(", ")}`);
+  const worker = await send(port, { path: "/sw.js" });
+  assert.equal(worker.status, 200);
+  // The worker caches the same files, and never the API.
+  for (const file of seen) assert.match(worker.text, new RegExp(`"/assets/${file.replace(".", "\\.")}"`), `sw.js caches ${file}`);
+  assert.match(worker.text, /startsWith\("\/v1\/"\)/);
+});
+
 test("an allowed tailnet login is trusted from tailscale serve, and only there", async (context) => {
   const { port } = await fixture(context);
   const session = await send(port, { path: "/v1/session", headers: viaTailscale("Owner@Example.com") });

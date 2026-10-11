@@ -67,6 +67,8 @@ export async function createJoinToken({ db, env, request, identity, ip, now }) {
     name: created.name,
     labels: created.labels,
     capabilities: created.capabilities,
+    // hc-core's URL for the dashboard's install commands (null until CORE_URL is set).
+    server,
     // The token goes on stdin, never in argv (§6).
     enrolCommand: `home-compute-agent enrol --server ${server ?? "<hc-core URL>"} --join-token-stdin`,
   });

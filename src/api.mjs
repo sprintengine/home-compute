@@ -27,7 +27,9 @@ const DASHBOARD_DIRECTORY = path.resolve(import.meta.dirname, "../dashboard");
 const DASHBOARD_FILES = {
   "/": ["index.html", "text/html; charset=utf-8"],
   "/index.html": ["index.html", "text/html; charset=utf-8"],
-  "/assets/app.js": ["app.js", "text/javascript; charset=utf-8"],
+  ...Object.fromEntries(["app", "lib", "ui", "data", "overview", "job", "run", "machines", "timetable", "admin"]
+    .map((name) => [`/assets/${name}.js`, [`${name}.js`, "text/javascript; charset=utf-8"]])),
+  "/sw.js": ["sw.js", "text/javascript; charset=utf-8"],
   "/assets/app.css": ["app.css", "text/css; charset=utf-8"],
   "/assets/icon.svg": ["icon.svg", "image/svg+xml"],
   "/manifest.webmanifest": ["manifest.webmanifest", "application/manifest+json"],

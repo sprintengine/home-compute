@@ -14,11 +14,15 @@
   <script type="module" src="/assets/app.js"></script>
 </head>
 <body>
+  <a class="skip" href="#main">Skip to content</a>
   <header class="top">
     <a class="brand" href="#/"><img src="/assets/icon.svg" alt="" width="22" height="22"><span>Home Compute</span></a>
     <div class="top-status" id="top-status" aria-live="polite"></div>
   </header>
-  <main id="main" tabindex="-1"><p class="muted center">Loading…</p></main>
+  <div class="shell">
+    <nav class="nav" id="nav" aria-label="Pages" hidden></nav>
+    <main id="main" tabindex="-1"><p class="muted center">Loading…</p></main>
+  </div>
   <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
   <noscript><p class="center">The dashboard needs JavaScript.</p></noscript>
 </body>

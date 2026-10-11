@@ -127,14 +127,16 @@ test("the CLI imports Wingfoil's timetable into hc-web under wrangler dev, and t
   await assert.rejects(execFile(process.execPath, [...importArgs, "--dry-run"], { env: { ...process.env, HC_URL: base } }), /HTTP 401/);
   assert.equal((await fetch(`${base}/v1/snapshot`)).status, 401);
 
-  // The existing dashboard is served as static assets and asks for the snapshot it can read.
+  // The dashboard is served as static assets and asks for the snapshot it can read.
   const page = await fetch(`${base}/`);
   assert.equal(page.status, 200);
   assert.match(await page.text(), /<script type="module" src="\/assets\/app.js">/);
   const script = await fetch(`${base}/assets/app.js`);
   assert.equal(script.status, 200);
   assert.match(script.headers.get("content-type"), /javascript/);
-  assert.match(await script.text(), /api\("\/v1\/snapshot"\)/);
+  assert.match(await script.text(), /from "\.\/data\.js"/);
+  const data = await fetch(`${base}/assets/data.js`);
+  assert.match(await data.text(), /api\("\/v1\/snapshot"\)/);
   assert.equal((await fetch(`${base}/assets/app.css`)).status, 200);
   assert.equal((await fetch(`${base}/manifest.webmanifest`)).status, 200);
   assert.match(page.headers.get("content-security-policy") ?? "", /default-src 'none'/);

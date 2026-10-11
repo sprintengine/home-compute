@@ -22,7 +22,7 @@
   },
   "scripts": {
     "build:studio": "npm run build --workspace @home-compute/studio-module",
-    "check": "node --check src/*.mjs src/core/*.mjs && node --check dashboard/app.js && node --test 'test/*.test.mjs' && npm run check --workspace @home-compute/studio-module && npm run check --workspace @home-compute/agent",
+    "check": "node --check src/*.mjs src/core/*.mjs && for file in dashboard/*.js; do node --check \"$file\" || exit 1; done && node --test 'test/*.test.mjs' && npm run check --workspace @home-compute/studio-module && npm run check --workspace @home-compute/agent",
     "test": "node --test 'test/*.test.mjs'",
     "build:agent": "npm run build --workspace @home-compute/agent"
   },
