@@ -52,7 +52,7 @@ async function setup(t) {
     const stored = await agentState.loadConfig();
     const created = new Agent({
       state: agentState,
-      config: { ...stored, statsIntervalSeconds: 0.05, stopGraceSeconds: 0.2, statusPort: 0, ...config },
+      config: { ...stored, allowImages: ["ghcr.io/example/*"], statsIntervalSeconds: 0.05, stopGraceSeconds: 0.2, statusPort: 0, ...config },
       credential: await agentState.readCredential(),
       runtime: runtime ?? new FakeRuntime({ clock }),
       clock,

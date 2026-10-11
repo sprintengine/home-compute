@@ -130,3 +130,59 @@ test("a completion record is cut to fit 256 KB, newest output kept", async (t) =
   assert.match(record.logTail.text, /599 界+$/);
   assert.equal(record.logTail.truncated, true);
 });
+
+test("the machine's policy refuses privileges, mounts, devices and the host's network, and runs nothing with an empty allowImages", async (t) => {
+  const asks = [
+    [{ privileged: true }, /privileged mode/], [{ volumes: ["/:/host"] }, /volumes/], [{ mounts: [{ source: "/var/run/docker.sock" }] }, /mounts/],
+    [{ devices: ["/dev/kvm"] }, /devices/], [{ capAdd: ["SYS_ADMIN"] }, /added capabilities/], [{ pid: "host" }, /PID namespace/],
+    [{ network: "host" }, /network host is not allowed/], [{ network: "container:db" }, /not allowed/],
+  ];
+  for (const [extra, reason] of asks) {
+    const { record, runtime } = await supervise(t, { spec: extra });
+    assert.match(record.error, reason, JSON.stringify(extra));
+    assert.equal(runtime.started.length, 0);
+  }
+  const { record } = await supervise(t, { config: { allowImages: [] } });
+  assert.match(record.error, /allowImages is empty, so it runs no image/);
+  const local = await supervise(t, { spec: { image: "wingfoil-forecast:local" }, config: { allowImages: ["*"] } });
+  assert.match(local.record.error, /only with allowLocalImages/);
+  const allowed = await supervise(t, { spec: { image: "wingfoil-forecast:local" }, config: { allowImages: ["wingfoil-forecast:*"], allowLocalImages: true } });
+  assert.equal(allowed.record.error, null);
+});
+
+test("a registry secret is used for the pull only: redacted, never in the run record or the outbox", async (t) => {
+  const password = "ghp_fakeRegistryToken0000000000000000000";
+  const state = await tempState(t);
+  const runtime = new FakeRuntime({ script: (spec) => ({ output: [`pulled with ${password}`], hang: true }) });
+  const id = runId();
+  const supervisor = new RunSupervisor({
+    claim: claimFor(id, { registryAuth: { server: "ghcr.io", username: "bot", password } }), runtime, state, outbox: new Outbox(state), clock: systemClock, config: CONFIG,
+  });
+  const done = supervisor.start();
+  await until(() => supervisor.phase === "running");
+  assert.deepEqual(runtime.auths, [{ server: "ghcr.io", username: "bot", password }]);
+  const onDisk = await readFile(state.runRecordPath(id), "utf8");
+  assert.ok(!onDisk.includes(password));
+  assert.equal(JSON.parse(onDisk).claim.spec.registryServer, "ghcr.io");
+  supervisor.cancel();
+  const record = await done;
+  assert.equal(record.logTail.text, "pulled with <redacted>");
+  assert.ok(!JSON.stringify(record).includes(password));
+});
+
+test("a run needing more disk than is free fails before anything is pulled; a cached image's digest comes from the runtime", async (t) => {
+  const { record, runtime } = await supervise(t, { spec: { resources: { cpus: 1, memoryMiB: 256, diskMiB: 60_000 } }, runtime: { diskFreeMiB: 4096 } });
+  assert.equal(record.error, "not enough disk: the run needs 60000 MiB and 4096 MiB are free");
+  assert.deepEqual([runtime.pulls.length, runtime.started.length], [0, 0]);
+  const state = await tempState(t);
+  const cached = new FakeRuntime({ images: ["ghcr.io/example/worker:production"] });
+  cached.imageDigest = async () => "sha256:0f0f";
+  const released = [];
+  cached.released = (id) => released.push(id);
+  const id = runId();
+  const supervisor = new RunSupervisor({ claim: claimFor(id, { image: "ghcr.io/example/worker:production" }), runtime: cached, state, outbox: new Outbox(state), clock: systemClock, config: CONFIG });
+  const done = await supervisor.start();
+  assert.equal(done.image.digest, "sha256:0f0f", "what a tag resolved to here is what ran");
+  assert.deepEqual(released, [id], "the runtime hears the run is over");
+});
+

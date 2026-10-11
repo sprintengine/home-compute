@@ -251,6 +251,17 @@ describe("claims", () => {
     expect(await rows("SELECT id FROM runs")).toHaveLength(1);
   });
 
+  it("marks an upcoming slot another machine is preferred for, so this one does not pre-warm its VM for it", async () => {
+    await createJob("blend", { schedule: { at: { hours: [8], minutes: [20] } }, placement: { preferMachines: ["mac-mini"] } }, { now: at(7) });
+    await cron(at(7, 30));
+    const other = await enrolMachine("box");
+    const preferred = await enrolMachine("mac-mini");
+    expect((await syncAs(other, at(8, 10))).body.upcoming).toEqual([
+      { jobId: "blend", dueAt: at(8, 20), cpus: 1, memoryMiB: 2048, preferred: false, preferredElsewhere: true },
+    ]);
+    expect((await syncAs(preferred, at(8, 10))).body.upcoming).toEqual([{ jobId: "blend", dueAt: at(8, 20), cpus: 1, memoryMiB: 2048, preferred: true }]);
+  });
+
   it("looks past the oldest 20 due runs when none of them is for this machine", async () => {
     for (let index = 0; index < 21; index += 1) await manualRun(`vaulted-${index}`, { secretEnv: { KEY: "vault:secret" } }, at(8) + index);
     const wanted = await manualRun("open", {}, at(8, 1));

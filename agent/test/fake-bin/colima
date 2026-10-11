@@ -1,0 +1,80 @@
+#!/bin/bash
+# A stand-in for colima in the agent's unit tests (the pattern of
+# macos/dev/fake-setup.sh). State lives in $COLIMA_HOME, as colima's own does
+# (the agent passes it; its docker.sock is the fake engine's):
+#
+#   calls               one line per call: its arguments
+#   <profile>.profile   the profile as `colima list --json` prints it (none: never created)
+#
+# Knobs (files in that directory):
+#   start-failures      a count: that many starts fail ("error starting vm"), then they succeed
+#   boot-delay          seconds a start takes (default 0)
+#   df-available-kb     the VM's free disk for `df -Pk /var/lib/docker` (default 9000000)
+set -u
+dir="${COLIMA_HOME:?COLIMA_HOME is not set}"
+printf '%s\n' "$*" >> "$dir/calls"
+command="${1:-}"
+[ $# -gt 0 ] && shift
+
+profile_arg() {
+  for argument in "$@"; do
+    case "$argument" in -*) ;; *) echo "$argument"; return ;; esac
+  done
+  echo default
+}
+
+write_profile() { # name status cpus memoryGiB diskGiB
+  memory="$(awk -v gib="$4" 'BEGIN { printf "%d", gib * 1073741824 }')"
+  disk="$(awk -v gib="$5" 'BEGIN { printf "%d", gib * 1073741824 }')"
+  printf '{"name":"%s","status":"%s","arch":"aarch64","cpus":%s,"memory":%s,"disk":%s,"runtime":"docker"}\n' \
+    "$1" "$2" "$3" "$memory" "$disk" > "$dir/$1.profile"
+}
+
+case "$command" in
+  version)
+    echo "colima version 0.10.1-fake"
+    echo "git commit: fake"
+    ;;
+  list)
+    for file in "$dir"/*.profile; do
+      if [ -e "$file" ]; then cat "$file"; fi
+    done
+    ;;
+  start)
+    profile="$(profile_arg "$@")"
+    cpus=2; memory=2; disk=60
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --cpus|--cpu) cpus="$2"; shift ;;
+        --memory) memory="$2"; shift ;;
+        --disk) disk="$2"; shift ;;
+      esac
+      shift
+    done
+    if [ -f "$dir/boot-delay" ]; then sleep "$(cat "$dir/boot-delay")"; fi
+    if [ -f "$dir/start-failures" ] && [ "$(cat "$dir/start-failures")" -gt 0 ]; then
+      echo $(( $(cat "$dir/start-failures") - 1 )) > "$dir/start-failures"
+      echo 'time="2026-10-11T10:00:00Z" level=fatal msg="error starting vm: error at '"'"'starting'"'"': exit status 1"' >&2
+      exit 1
+    fi
+    write_profile "$profile" Running "$cpus" "$memory" "$disk"
+    echo 'time="2026-10-11T10:00:00Z" level=info msg=done' >&2
+    ;;
+  stop)
+    profile="$(profile_arg "$@")"
+    if [ -f "$dir/$profile.profile" ]; then
+      sed 's/"status":"Running"/"status":"Stopped"/' "$dir/$profile.profile" > "$dir/$profile.tmp" && mv "$dir/$profile.tmp" "$dir/$profile.profile"
+    fi
+    ;;
+  delete)
+    rm -f "$dir/$(profile_arg "$@").profile"
+    ;;
+  ssh)
+    echo "Filesystem     1024-blocks  Used Available Capacity Mounted on"
+    echo "/dev/vdb1         10216724   312 $(cat "$dir/df-available-kb" 2>/dev/null || echo 9000000)   1% /var/lib/docker"
+    ;;
+  *)
+    echo "fake colima: unknown command $command" >&2
+    exit 1
+    ;;
+esac

@@ -122,6 +122,8 @@ class FakeContainer {
       remove: async () => {
         this.runtime.containers.delete(this.id);
       },
+      // As Docker's: the container's own environment still holds what it was given.
+      secretValues: async (names) => names.map((name) => this.spec.secretEnv?.[name]).filter((value) => typeof value === "string"),
     };
   }
 }
@@ -167,20 +169,23 @@ export class FakeRuntime {
     return [...this.containers.values()].filter((container) => !container.result);
   }
 
+  /** Nothing runs: a real runtime prunes old images here; this one only counts. */
   async idle() {
-    if (this.vm === "running" && !this.running().length) this.vm = "stopped";
+    this.idles = (this.idles ?? 0) + 1;
   }
 
+  /** Stops the fake VM when nothing runs in it. */
   async stop() {
-    await this.idle();
+    if (this.vm === "running" && !this.running().length) this.vm = "stopped";
   }
 
   async hasImage(ref) {
     return this.images.has(ref);
   }
 
-  async pull(ref) {
+  async pull(ref, { auth = null } = {}) {
     this.pulls.push(ref);
+    this.auths = [...(this.auths ?? []), auth];
     const started = this.clock.monotonic();
     await this.clock.sleep(this.pullMs);
     if (this.failPull) throw new Error(this.failPull);

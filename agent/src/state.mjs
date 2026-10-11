@@ -21,15 +21,21 @@ export const DEFAULT_CONFIG = {
   name: null,
   runtime: "fake",
   caps: {},
-  allowImages: ["*"],
+  allowImages: [],
   allowLocalImages: false,
   envFile: null,
   statusPort: DEFAULT_STATUS_PORT,
   stopGraceSeconds: 30,
   statsIntervalSeconds: 3,
   pullTimeoutSeconds: 1200,
+  docker: {},
+  colima: {},
+  caffeinate: "auto",
   fake: {},
 };
+
+const COLIMA_NUMBERS = ["diskGiB", "minCpus", "minMemoryMiB", "startTimeoutSeconds"];
+const COLIMA_SECONDS = ["idleStopSeconds", "keepWarmSeconds"];
 
 function writable(directory) {
   try {
@@ -86,6 +92,22 @@ function checkConfig(config) {
   if (!Number.isInteger(config.statusPort) || config.statusPort < 0 || config.statusPort > 65_535) {
     throw new Error("statusPort must be a port number (0 to turn the status server off)");
   }
+  for (const section of ["docker", "colima", "caps"]) {
+    if (config[section] === null || typeof config[section] !== "object" || Array.isArray(config[section])) throw new Error(`${section} must be an object`);
+  }
+  for (const key of COLIMA_NUMBERS) {
+    const value = config.colima[key];
+    if (value !== undefined && value !== null && !(typeof value === "number" && value > 0)) throw new Error(`colima.${key} must be a positive number`);
+  }
+  for (const key of COLIMA_SECONDS) {
+    const value = config.colima[key];
+    if (value !== undefined && value !== null && !(typeof value === "number" && value >= 0)) throw new Error(`colima.${key} must be a number of seconds (0 or more)`);
+  }
+  if (config.colima.profile !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(String(config.colima.profile))) {
+    throw new Error("colima.profile must be a profile name");
+  }
+  if (config.colima.profile === "default") throw new Error("colima.profile must not be \"default\": the agent uses a profile of its own");
+  if (![true, false, "auto"].includes(config.caffeinate)) throw new Error("caffeinate must be true, false or \"auto\"");
   return config;
 }
 

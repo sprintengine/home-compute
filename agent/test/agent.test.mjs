@@ -3,42 +3,13 @@
 // tails sent only when changed, drain and the local status server, and
 // adopting containers after a restart.
 import assert from "node:assert/strict";
-import { stat } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import test from "node:test";
 import { Agent, backoffDelay, MAX_BACKOFF_MS } from "../src/agent.mjs";
 import { systemClock } from "../src/clock.mjs";
 import { FakeRuntime } from "../src/runtime/fake.mjs";
 import { startStatusServer } from "../src/status-server.mjs";
-import { claimFor, CONFIG, events, runId, stubFetch, tempState, until } from "./support.mjs";
-
-const OK_SYNC = () => ({ serverTime: Date.now(), nextSyncInMs: 10_000, claims: [], cancel: [], upcoming: [], config: {}, update: null,
-  provisioningTasks: [], rotateCredential: null });
-
-/** A stand-in hc-core: `plan` answers in order (then OK), `claims`/`cancel`/`rotate` ride on the next sync. */
-function controlPlane() {
-  const plane = { syncs: [], completes: [], claims: [], cancel: [], rotate: null, syncPlan: [], completePlan: [] };
-  plane.fetch = stubFetch(({ path, body, headers }) => {
-    if (path === "/agent/v1/sync") {
-      plane.syncs.push({ body, authorization: headers.authorization });
-      const planned = plane.syncPlan.shift();
-      if (typeof planned === "function") return planned();
-      if (planned) return planned;
-      const rotateCredential = plane.rotate ? { credential: plane.rotate } : null;
-      plane.rotate = null;
-      return { body: { ...OK_SYNC(), claims: plane.claims.splice(0), cancel: plane.cancel.splice(0), rotateCredential } };
-    }
-    const complete = path.match(/^\/agent\/v1\/runs\/([^/]+)\/complete$/);
-    if (complete) {
-      const planned = plane.completePlan.shift();
-      if (typeof planned === "function") return planned();
-      if (planned) return planned;
-      plane.completes.push({ id: complete[1], body });
-      return { body: { ok: true, runId: complete[1], state: body.exitCode === 0 ? "succeeded" : "failed" } };
-    }
-    return { status: 404, body: { error: "not_found" } };
-  });
-  return plane;
-}
+import { claimFor, CONFIG, controlPlane, events, OK_SYNC, runId, tempState, until } from "./support.mjs";
 
 async function makeAgent(t, { plane = controlPlane(), runtime = new FakeRuntime(), clock = systemClock, config = {}, state, random } = {}) {
   const agentState = state ?? await tempState(t);
@@ -234,6 +205,28 @@ test("after a restart the agent adopts its containers, and fails a run whose con
   const orphan = first.plane.completes.find((entry) => entry.id === lost);
   assert.match(orphan.body.error, /container was gone/);
   assert.equal(orphan.body.failed, true);
+});
+
+test("after a restart, delivered secrets are read back from the container so the replayed log is still redacted", async (t) => {
+  const secret = "delivered-s3cr3t-value-77";
+  const runtime = new FakeRuntime({ script: (spec) => ({ output: [`key=${spec.secretEnv.R2_KEY} local=${spec.secretEnv.LOCAL_ONE}`], hang: true }) });
+  const first = await makeAgent(t, { runtime });
+  await writeFile(first.state.defaultEnvPath, "HC_LOCAL=local-value-1234\n", { mode: 0o600 });
+  first.agent.env = await first.state.readEnv(first.agent.config);
+  const id = runId();
+  first.plane.claims.push(claimFor(id, { secretEnv: { R2_KEY: secret }, localEnv: [{ name: "LOCAL_ONE", from: "HC_LOCAL" }] }));
+  await first.agent.syncOnce();
+  await until(() => first.agent.runs.get(id)?.phase === "running");
+  const onDisk = await readFile(first.state.runRecordPath(id), "utf8");
+  assert.ok(!onDisk.includes(secret), "the run record names the secret, never its value");
+  assert.deepEqual(JSON.parse(onDisk).claim.spec.secretNames, ["R2_KEY"]);
+  first.agent.kill();
+
+  const second = await makeAgent(t, { runtime, state: first.state, plane: first.plane });
+  runtime.containerOf(id).exit({ exitCode: 0, oomKilled: false });
+  await second.agent.idle();
+  const report = first.plane.completes.find((entry) => entry.id === id);
+  assert.equal(report.body.logTail.text, "key=<redacted> local=<redacted>");
 });
 
 test("a sync body stays inside 128 KB however wide its runs' output, and free figures never go below zero", async (t) => {

@@ -49,6 +49,8 @@ test("enrol reads the join token from stdin and writes a 0600 configuration and 
   assert.equal(await state.readCredential(), CREDENTIAL);
   const config = await state.loadConfig();
   assert.deepEqual([config.server, config.machineId, config.name, config.runtime], ["https://core.test", MACHINE, "box", "fake"]);
+  assert.deepEqual([config.allowImages, config.allowLocalImages], [[], false], "nothing may run until the owner says what");
+  assert.match(first.lines.join("\n"), /No image may run yet/);
   for (const file of [state.configPath, state.credentialPath]) assert.equal((await stat(file)).mode & 0o777, 0o600);
   const sent = fetch.requests[0].body;
   assert.equal(sent.protocol, 1);
@@ -70,6 +72,10 @@ test("status says when the agent is not running; doctor checks the setup step by
   const status = io({ fetch });
   assert.equal(await main(["status", "--state-dir", state.dir], status), 1);
   assert.match(status.lines.join("\n"), /box \(m_.*\n.*not running/);
+  const empty = io({ fetch });
+  assert.equal(await main(["doctor", "--state-dir", state.dir], empty), 1, "no image may run until allowImages lists some");
+  assert.match(empty.lines.join("\n"), /^FAIL allowImages is empty, so this machine runs no image/m);
+  await state.saveConfig({ ...(await state.loadConfig()), allowImages: ["*"] });
   const doctor = io({ fetch });
   assert.equal(await main(["doctor", "--state-dir", state.dir], doctor), 0, doctor.lines.join("\n"));
   const text = doctor.lines.join("\n");
@@ -78,6 +84,10 @@ test("status says when the agent is not running; doctor checks the setup step by
   assert.match(text, /^warn allowImages is "\*"/m);
   assert.match(text, /^ok   runtime fake/m);
   assert.match(text, /^ok   first sync accepted the credential/m);
+  await state.saveConfig({ ...(await state.loadConfig()), allowImages: ["ghcr.io/example/*"] });
+  const narrow = io({ fetch });
+  assert.equal(await main(["doctor", "--state-dir", state.dir], narrow), 0);
+  assert.match(narrow.lines.join("\n"), /^ok   allowImages: ghcr\.io\/example\/\*$/m);
   const unenrolled = await tempState(t);
   assert.equal(await main(["doctor", "--state-dir", unenrolled.dir], io({ fetch })), 1);
 });

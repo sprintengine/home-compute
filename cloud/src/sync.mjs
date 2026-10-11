@@ -289,8 +289,10 @@ export async function sync(db, request, { machine: row, rotated, now, ip }) {
     if (!job || !job.enabled || job.paused || globalPause || claimBlockers(job).length) continue;
     if (!labelsMatch(job.placement?.requireLabels, machine.labels)) continue;
     const preferred = (job.placement?.preferMachines ?? []).includes(machine.name);
-    upcoming.push({ jobId: job.id, dueAt: state.next_due_at, cpus: job.resources.cpus, memoryMiB: job.resources.memoryMiB, preferred });
     const others = job.placement?.preferMachines?.length && !preferred;
+    // A slot another machine is preferred for: this one takes it only if that one cannot, so it does not pre-warm for it (§4.4).
+    upcoming.push({ jobId: job.id, dueAt: state.next_due_at, cpus: job.resources.cpus, memoryMiB: job.resources.memoryMiB, preferred,
+      ...(others ? { preferredElsewhere: true } : {}) });
     events.push(others ? preferredUntil(job, state.next_due_at) : state.next_due_at);
   }
   upcoming.sort((a, b) => a.dueAt - b.dueAt);

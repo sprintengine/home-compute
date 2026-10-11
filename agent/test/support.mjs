@@ -76,3 +76,32 @@ export async function until(check, { timeoutMs = 5000, everyMs = 10 } = {}) {
     await new Promise((resolve) => setTimeout(resolve, everyMs));
   }
 }
+
+export const OK_SYNC = () => ({ serverTime: Date.now(), nextSyncInMs: 10_000, claims: [], cancel: [], upcoming: [], config: {}, update: null,
+  provisioningTasks: [], rotateCredential: null });
+
+/** A stand-in hc-core: `plan` answers in order (then OK), `claims`/`cancel`/`rotate` ride on the next sync. */
+export function controlPlane() {
+  const plane = { syncs: [], completes: [], claims: [], cancel: [], rotate: null, syncPlan: [], completePlan: [] };
+  plane.fetch = stubFetch(({ path, body, headers }) => {
+    if (path === "/agent/v1/sync") {
+      plane.syncs.push({ body, authorization: headers.authorization });
+      const planned = plane.syncPlan.shift();
+      if (typeof planned === "function") return planned();
+      if (planned) return planned;
+      const rotateCredential = plane.rotate ? { credential: plane.rotate } : null;
+      plane.rotate = null;
+      return { body: { ...OK_SYNC(), claims: plane.claims.splice(0), cancel: plane.cancel.splice(0), rotateCredential } };
+    }
+    const complete = path.match(/^\/agent\/v1\/runs\/([^/]+)\/complete$/);
+    if (complete) {
+      const planned = plane.completePlan.shift();
+      if (typeof planned === "function") return planned();
+      if (planned) return planned;
+      plane.completes.push({ id: complete[1], body });
+      return { body: { ok: true, runId: complete[1], state: body.exitCode === 0 ? "succeeded" : "failed" } };
+    }
+    return { status: 404, body: { error: "not_found" } };
+  });
+  return plane;
+}

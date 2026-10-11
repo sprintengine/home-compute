@@ -5,6 +5,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { RUN_LABEL } from "../../src/core/protocol.mjs";
 import { FakeRuntime } from "../src/runtime/fake.mjs";
+import { ColimaRuntime } from "../src/runtime/colima.mjs";
+import { DockerCliRuntime } from "../src/runtime/docker-cli.mjs";
 import { assertRuntime, createRuntime } from "../src/runtime/runtime.mjs";
 
 const spec = (extra = {}) => ({
@@ -18,11 +20,15 @@ async function collect(handle) {
   return lines;
 }
 
-test("it implements the runtime interface, and only fake exists before M3", () => {
+test("it implements the runtime interface; the configuration picks fake, docker or colima", () => {
   assertRuntime(new FakeRuntime());
   assert.throws(() => assertRuntime({ run() {} }), /lacks ensureReady/);
   assert.ok(createRuntime({ runtime: "fake" }) instanceof FakeRuntime);
-  assert.throws(() => createRuntime({ runtime: "docker" }), /arrives in M3/);
+  assert.ok(assertRuntime(createRuntime({ runtime: "docker" })) instanceof DockerCliRuntime);
+  const colima = assertRuntime(createRuntime({ runtime: "colima", caps: { cpus: 2, memoryMiB: 3072 }, colima: { profile: "hc-x", minCpus: 1 } }));
+  assert.ok(colima instanceof ColimaRuntime);
+  assert.deepEqual([colima.profile, colima.caps, colima.min.cpus, colima.min.memoryMiB], ["hc-x", { cpus: 2, memoryMiB: 3072 }, 1, 2048]);
+  assert.throws(() => createRuntime({ runtime: "podman" }), /Unknown runtime podman/);
 });
 
 test("a script prints its lines with delays, reports memory, and exits with its code", async () => {
@@ -73,6 +79,6 @@ test("a VM boots once, can fail to start, and idles; pulls give digests; contain
   assert.deepEqual(await collect(adopted), ["hello from the fake runtime"], "the whole log is replayed");
   await adopted.remove();
   assert.deepEqual(await runtime.adopt(), []);
-  await runtime.idle();
+  await runtime.stop();
   assert.equal((await runtime.facts()).vm.state, "stopped");
 });

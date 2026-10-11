@@ -99,7 +99,15 @@ export class RunSupervisor {
     return this.done;
   }
 
-  /** A container found running (or exited) after a restart, with what was recorded when it started. */
+  /**
+   * A container found running (or exited) after a restart, with what was
+   * recorded when it started. Secret values delivered with the claim lived
+   * only in the old process (the run record names them, never their values):
+   * local ones are read again from the env file, and the others are read back
+   * from the container's own environment where the runtime can (Docker keeps
+   * it until the container is removed), so the replayed log is redacted as
+   * the first one was. A runtime that cannot falls back to the patterns.
+   */
   adopt(handle, record) {
     this.handle = handle;
     this.digest = record?.digest ?? null;
@@ -107,12 +115,18 @@ export class RunSupervisor {
     this.pullMs = record?.pullMs ?? 0;
     this.startedWall = record?.startedAt ?? this.clock.now();
     this.startedMono = this.clock.monotonic() - Math.max(0, this.clock.now() - this.startedWall);
-    // Secret values delivered with the claim lived only in the old process; local ones are read again.
-    const secrets = (this.spec.localEnv ?? []).map(({ from }) => this.env.get(from)).filter(Boolean);
-    // The runtime replays the container's whole log, so the local copy is written afresh.
-    this.capture = new LogCapture({ secrets, file: this.state.logPath(this.id), append: false });
     this.phase = "running";
-    this.done = this.#supervise().catch((error) => this.#crashed(error));
+    this.done = (async () => {
+      const local = (this.spec.localEnv ?? []).map(({ from }) => this.env.get(from)).filter(Boolean);
+      const stored = record?.claim?.spec ?? {};
+      // M2's records listed the names in `secretEnv`.
+      const delivered = stored.secretNames ?? (Array.isArray(stored.secretEnv) ? stored.secretEnv : []);
+      const names = [...delivered, ...(this.spec.localEnv ?? []).map(({ name }) => name)];
+      const recovered = names.length && handle.secretValues ? await handle.secretValues(names).catch(() => []) : [];
+      // The runtime replays the container's whole log, so the local copy is written afresh.
+      this.capture = new LogCapture({ secrets: [...local, ...recovered], file: this.state.logPath(this.id), append: false });
+      return this.#supervise();
+    })().catch((error) => this.#crashed(error));
     return this.done;
   }
 
@@ -132,10 +146,11 @@ export class RunSupervisor {
     if (this.handle) this.#stopContainer();
   }
 
-  /** For tests (and a crash): drop everything without a result, as a killed process would. */
+  /** A service stop (and tests): drop everything without a result, as a killed process would; the container runs on. */
   abandon() {
     this.aborted = true;
     this.exit.abort();
+    this.handle?.detach?.();
     // Let a supervision waiting on a container that never exits return (with nothing).
     this.giveUp.resolve({ exitCode: null, oomKilled: false, abandoned: true });
   }
@@ -151,7 +166,9 @@ export class RunSupervisor {
       local[name] = value;
     }
     const secretEnv = { ...(spec.secretEnv ?? {}), ...local };
-    this.capture = new LogCapture({ secrets: Object.values(secretEnv), file: this.state.logPath(this.id) });
+    // A registry secret (§4.5) is used for the pull only, and redacted like the others.
+    const auth = spec.registryAuth?.password ? spec.registryAuth : null;
+    this.capture = new LogCapture({ secrets: [...Object.values(secretEnv), ...(auth ? [auth.password] : [])], file: this.state.logPath(this.id) });
 
     const facts = await this.runtime.facts().catch(() => null);
     if (facts?.vm && facts.vm.state !== "running") this.setPhase("starting-vm");
@@ -167,15 +184,25 @@ export class RunSupervisor {
     if (this.cancelRequested) return this.#finish({ cancelled: true });
     if (this.aborted) return null;
 
+    // Disk cannot be limited per container (§4.3), so a run that would not fit is not started.
+    const diskMiB = this.resources.diskMiB;
+    if (diskMiB) {
+      const free = (await this.runtime.facts().catch(() => null))?.diskFreeMiB;
+      if (typeof free === "number" && free < diskMiB) {
+        return this.#finish({ error: `not enough disk: the run needs ${diskMiB} MiB and ${free} MiB are free` });
+      }
+    }
+
     if (await this.runtime.hasImage(spec.image)) {
-      this.digest = spec.image.includes("@") ? spec.image.slice(spec.image.indexOf("@") + 1) : null;
+      this.digest = (await this.runtime.imageDigest?.(spec.image).catch(() => null))
+        ?? (spec.image.includes("@") ? spec.image.slice(spec.image.indexOf("@") + 1) : null);
     } else {
       this.setPhase("pulling");
       const pullStarted = this.clock.monotonic();
       const timeout = new AbortController();
       try {
         const result = await Promise.race([
-          this.runtime.pull(spec.image, { auth: null }),
+          this.runtime.pull(spec.image, { auth, timeoutMs: this.config.pullTimeoutSeconds * 1000 }),
           this.clock.sleep(this.config.pullTimeoutSeconds * 1000, timeout.signal).then(() => PULL_TIMED_OUT),
         ]);
         if (result === PULL_TIMED_OUT) {
@@ -193,9 +220,10 @@ export class RunSupervisor {
     if (this.aborted) return null;
 
     // Recorded before the container exists: a crash in between still knows which secrets to redact on adoption.
+    const { secretEnv: delivered, registryAuth, ...plain } = spec;
     const runRecord = {
-      // Never a secret value on disk: secretEnv keeps only its names.
-      claim: { run: this.claim.run, spec: { ...spec, secretEnv: Object.keys(spec.secretEnv ?? {}) } },
+      // Never a secret value on disk: only the names of the delivered secrets, and no registry credential.
+      claim: { run: this.claim.run, spec: { ...plain, secretEnv: {}, secretNames: Object.keys(delivered ?? {}), registryServer: registryAuth?.server ?? null } },
       containerId: null, startedAt: this.clock.now(), vmWaitMs: this.vmWaitMs, pullMs: this.pullMs, digest: this.digest,
     };
     await this.state.writeRunRecord(this.id, runRecord);
@@ -346,6 +374,7 @@ export class RunSupervisor {
     this.record = record;
     this.finished = true;
     if (this.handle && !keepContainer) await this.handle.remove?.().catch((removal) => this.log("remove_error", { run: this.id, error: removal.message }));
+    this.runtime.released?.(this.id);
     await this.state.removeRunRecord(this.id);
     this.log("run_finished", { run: this.id, job: this.jobId, exitCode, oomKilled, timedOut, cancelled, error: message });
     this.events.finished?.(this);

@@ -20,10 +20,10 @@ export function nameFromHost(hostname = os.hostname()) {
 }
 
 /** What the agent tells the control plane about this machine. */
-export async function machineFacts(config, { runtime } = {}) {
+export async function machineFacts(config, { runtime, env } = {}) {
   let runtimeFacts = {};
   try {
-    runtimeFacts = await (runtime ?? createRuntime(config)).facts();
+    runtimeFacts = await (runtime ?? createRuntime(config, { env })).facts();
   } catch (error) {
     runtimeFacts = { error: error.message };
   }
@@ -44,17 +44,22 @@ export async function machineFacts(config, { runtime } = {}) {
 
 /**
  * Enrols this machine. Refuses when a credential is already stored, unless
- * `reenrol`. Returns what hc-core answered, without the credential.
+ * `reenrol`. `settings`: configuration fields to set with it (allowImages,
+ * allowLocalImages, colima). Returns what hc-core answered, without the
+ * credential.
  */
-export async function enrol({ state, server, joinToken, name, runtime = "fake", reenrol = false, fetch, runtimeInstance }) {
+export async function enrol({ state, server, joinToken, name, runtime = "fake", reenrol = false, fetch, runtimeInstance, settings = {}, env }) {
   if (!server) throw new Error("--server is required: hc-core's URL");
   if (!joinToken) throw new Error("A join token is required (--join-token-stdin)");
   const existing = await state.loadConfig().catch(() => null);
   if (!reenrol && await state.readCredential()) {
     throw new Error(`This machine is already enrolled${existing?.name ? ` as ${existing.name}` : ""}; pass --reenrol to replace it`);
   }
-  const config = { ...DEFAULT_CONFIG, ...(existing ?? {}), server: String(server).replace(/\/+$/, ""), runtime };
-  const facts = await machineFacts(config, { runtime: runtimeInstance });
+  const config = {
+    ...DEFAULT_CONFIG, ...(existing ?? {}), ...settings, server: String(server).replace(/\/+$/, ""), runtime,
+    colima: { ...(existing?.colima ?? {}), ...(settings.colima ?? {}) },
+  };
+  const facts = await machineFacts(config, { runtime: runtimeInstance, env });
   const client = new ControlPlaneClient({ server: config.server, fetch });
   const { body } = await client.enrol({ joinToken: joinToken.trim(), name: name ?? nameFromHost(), facts });
   await state.saveConfig({ ...config, machineId: body.machineId, name: body.name });

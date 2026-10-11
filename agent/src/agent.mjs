@@ -3,7 +3,9 @@
 // sets, taking the claims it is given and supervising each run. On 5xx, 429
 // or 1027 it backs off exponentially with jitter (at most 5 minutes) while
 // its containers carry on; on 401/403 it claims nothing more, finishes what
-// it runs and keeps the results; on 426 it waits for an update (M7).
+// it runs and keeps the results; on 426 it waits for an update (M7). Beside
+// the sync loop, a runtime with a VM (Colima) gets lifecycle steps (§4.4):
+// pre-warm before an upcoming slot, resize while empty, stop when idle.
 
 import { PROTOCOL } from "../../src/core/protocol.mjs";
 import { systemClock } from "./clock.mjs";
@@ -28,6 +30,9 @@ const DEFAULT_MAX_RUNS = 2;
 const CLOCK_SKEW_WARNING_MS = 30_000;
 /** While the runtime counts as failed, how often to try starting it again (nothing else would). */
 const RUNTIME_PROBE_MS = 5 * 60_000;
+/** The VM lifecycle looks again at least this often, and at most once a second. */
+const VM_TICK_MAX_MS = 30_000;
+const VM_TICK_MIN_MS = 1_000;
 const MAX_ERROR_CHARS = 300;
 /** Complete answers worth sending again later: a timeout, or the server's "it changed meanwhile; send it again". */
 const RETRY_COMPLETE = new Set([408, 409]);
@@ -56,7 +61,7 @@ function iso(time) {
 }
 
 export class Agent {
-  constructor({ state, config, credential, runtime, clock = systemClock, fetch = globalThis.fetch, log = jsonLog, random = Math.random }) {
+  constructor({ state, config, credential, runtime, clock = systemClock, fetch = globalThis.fetch, log = jsonLog, random = Math.random, caffeinate = null }) {
     this.state = state;
     this.config = config;
     this.credential = credential;
@@ -64,6 +69,10 @@ export class Agent {
     this.clock = clock;
     this.log = log;
     this.random = random;
+    this.caffeinate = caffeinate;
+    this.lastFacts = null;
+    this.vmDecision = null;
+    this.vmWakeup = null;
     this.client = new ControlPlaneClient({ server: config.server, credential: () => this.credential, fetch });
     this.outbox = new Outbox(state);
     /** Run id → its supervisor, until the control plane has its result. */
@@ -119,8 +128,13 @@ export class Agent {
       env: this.env, log: this.log,
       events: {
         phase: () => this.#phaseChanged(),
-        finished: () => this.#track(this.flushOutbox()),
+        finished: () => {
+          this.#runsChanged();
+          this.#track(this.flushOutbox());
+        },
         runtimeError: (error) => {
+          // A VM without room beside running containers is not a failed start.
+          if (error.countsAsFailure === false) return;
           this.readyFailures += 1;
           this.runtimeError = clip(error.message);
           this.lastProbeAt = this.clock.now();
@@ -140,7 +154,7 @@ export class Agent {
    */
   async adopt() {
     const records = await this.state.readRunRecords();
-    for (const handle of await this.runtime.adopt()) {
+    for (const handle of await this.runtime.adopt({ expected: records.size })) {
       const runId = handle.runId;
       if (!runId || this.runs.has(runId)) continue;
       const record = records.get(runId) ?? null;
@@ -167,17 +181,100 @@ export class Agent {
       this.#track(supervisor.orphaned());
       this.log("run_orphaned", { run: runId });
     }
+    this.#runsChanged();
+  }
+
+  /** Runs that are not finished: what holds the VM, the Mac awake and a run slot. */
+  activeRuns() {
+    return [...this.runs.values()].filter((run) => !run.finished);
+  }
+
+  /**
+   * Something started or finished: tell the runtime what it holds (the VM is
+   * sized for it), hold the Mac awake while anything runs (§4.4), prune old
+   * images when nothing does (§4.5), and let the VM lifecycle look again.
+   */
+  #runsChanged() {
+    const active = this.activeRuns();
+    this.runtime.setContext?.({ runs: active.map((run) => run.resources), busy: active.length > 0 });
+    if (active.length) this.caffeinate?.hold();
+    else {
+      this.caffeinate?.release();
+      if (this.runs.size === 0 || [...this.runs.values()].every((run) => run.finished)) {
+        if (this.runtime.idle && !this.killed) this.#track(this.runtime.idle());
+      }
+    }
+    this.vmWakeup?.abort();
+  }
+
+  /** The idle and keep-warm times: the machine's own colima settings win over the control plane's `config`. */
+  vmConfig() {
+    const local = this.config.colima ?? {};
+    const server = this.serverConfig ?? {};
+    return {
+      idleStopSeconds: local.idleStopSeconds ?? server.idleStopSeconds ?? 300,
+      keepWarmSeconds: local.keepWarmSeconds ?? server.keepWarmSeconds ?? 600,
+    };
+  }
+
+  /**
+   * One VM lifecycle step (§4.4), for a runtime that has one: pre-warm,
+   * resize or stop as the runtime decides from the runs and upcoming slots.
+   * A failed pre-warm counts toward the three failed starts that make the
+   * machine unhealthy; once it is, only the 5-minute probe starts the VM.
+   */
+  async lifecycleTick() {
+    if (!this.runtime.tick || this.killed) return null;
+    const active = this.activeRuns();
+    this.runtime.setContext?.({ runs: active.map((run) => run.resources), busy: active.length > 0, upcoming: this.upcoming, config: this.vmConfig() });
+    const decision = await this.runtime.tick({ mayStart: this.readyFailures < READY_FAILURES_UNHEALTHY });
+    this.vmDecision = decision;
+    if (decision.action !== "none") {
+      this.log(decision.error ? "vm_error" : `vm_${decision.action}`, { reason: decision.reason, ...(decision.error ? { error: decision.error.message } : {}) });
+    }
+    if (decision.error && (decision.action === "start" || decision.action === "resize")) {
+      if (decision.error.countsAsFailure !== false) this.readyFailures += 1;
+      this.runtimeError = clip(decision.error.message);
+      this.lastProbeAt = this.clock.now();
+    } else if (decision.action === "start" || decision.action === "resize") {
+      this.readyFailures = 0;
+      this.runtimeError = null;
+    }
+    return decision;
+  }
+
+  async #vmLoop() {
+    while (!this.stopped) {
+      let decision = null;
+      try {
+        decision = await this.lifecycleTick();
+      } catch (error) {
+        this.log("vm_error", { error: error.message });
+      }
+      if (this.stopped) return;
+      const until = (decision?.wakeAt ?? Infinity) - this.clock.now();
+      this.vmWakeup = new AbortController();
+      await this.clock.sleep(Math.min(VM_TICK_MAX_MS, Math.max(VM_TICK_MIN_MS, until)), this.vmWakeup.signal);
+      this.vmWakeup = null;
+    }
   }
 
   /** What this machine can take now: its caps (or what the runtime has) less what its runs hold. */
   free(facts) {
     const caps = this.config.caps ?? {};
-    const active = [...this.runs.values()].filter((run) => !run.finished);
+    const active = this.activeRuns();
     let cpus = caps.cpus ?? facts?.cpus ?? 0;
     let memoryMiB = caps.memoryMiB ?? facts?.memoryMiB ?? 0;
     for (const run of active) {
       cpus -= run.resources.cpus ?? 0;
       memoryMiB -= run.resources.memoryMiB ?? 0;
+    }
+    // A VM holding containers cannot be resized (§4.4): until they finish, a run must fit the VM as it is.
+    const vm = facts?.vm;
+    if (vm?.state === "running" && active.length && vm.memoryMiB) {
+      const held = active.reduce((total, run) => total + (run.resources.memoryMiB ?? 0), 0);
+      memoryMiB = Math.min(memoryMiB, vm.memoryMiB - (vm.overheadMiB ?? 0) - held);
+      if (vm.cpus) cpus = Math.min(cpus, vm.cpus);
     }
     const disk = facts?.diskFreeMiB ?? 0;
     // Never below zero: a run the server sent again, or a runtime that did not answer, must not make a body it refuses.
@@ -190,10 +287,12 @@ export class Agent {
   }
 
   health() {
+    const bootSeconds = this.lastFacts?.vm?.bootSeconds;
     return {
       docker: this.runtimeOk ? "ok" : "unreachable",
       lastError: clip(this.runtimeError),
       ...(this.readyFailures >= READY_FAILURES_UNHEALTHY ? { vm: "failed" } : {}),
+      ...(typeof bootSeconds === "number" ? { vmBootSeconds: bootSeconds } : {}),
     };
   }
 
@@ -227,6 +326,7 @@ export class Agent {
     let facts = null;
     try {
       facts = await this.runtime.facts();
+      this.lastFacts = facts;
       this.runtimeOk = true;
     } catch (error) {
       this.runtimeOk = false;
@@ -271,6 +371,7 @@ export class Agent {
     if (response.rotateCredential?.credential) await this.#rotate(response.rotateCredential.credential);
     this.upcoming = response.upcoming ?? [];
     this.serverConfig = response.config ?? null;
+    this.vmWakeup?.abort();
     if (response.claims?.length || response.cancel?.length) {
       this.log("sync", { claims: response.claims.map((entry) => entry.run.id), cancel: response.cancel, next: response.nextSyncInMs, sentAt: iso(sentAt) });
     }
@@ -300,6 +401,7 @@ export class Agent {
     this.runs.set(claim.run.id, supervisor);
     this.log("run_claimed", { run: claim.run.id, job: claim.run.jobId, attempt: claim.run.attempt, image: claim.spec.image });
     this.#track(supervisor.start());
+    this.#runsChanged();
   }
 
   async #rotate(credential) {
@@ -374,6 +476,7 @@ export class Agent {
   /** The service loop: sync, wait as long as the server said (or back off), again, until stop(). */
   async run() {
     this.stopped = false;
+    const vmLoop = this.runtime.tick ? this.#vmLoop() : null;
     while (!this.stopped) {
       let delay;
       try {
@@ -398,12 +501,15 @@ export class Agent {
       this.wakeup = null;
       if (this.revoked) await this.#reloadCredential();
     }
+    this.vmWakeup?.abort();
+    await vmLoop;
   }
 
   /** Stops syncing. Containers keep running and are adopted by the next start. */
   async stop() {
     this.stopped = true;
     this.wake();
+    this.vmWakeup?.abort();
   }
 
   /**
@@ -412,6 +518,7 @@ export class Agent {
    */
   detach() {
     for (const run of this.runs.values()) if (!run.finished) run.abandon();
+    this.caffeinate?.release();
   }
 
   /** For tests: as if the process were killed: no more syncs, sends or results from this object. */
@@ -419,7 +526,9 @@ export class Agent {
     this.killed = true;
     this.stopped = true;
     for (const run of this.runs.values()) run.abandon();
+    this.caffeinate?.release();
     this.wake();
+    this.vmWakeup?.abort();
   }
 
   async setDrain(drain) {
@@ -447,7 +556,11 @@ export class Agent {
       lastError: this.lastError,
       clockSkewMs: this.clockSkewMs,
       ...(Math.abs(this.clockSkewMs ?? 0) > CLOCK_SKEW_WARNING_MS ? { clockSkewWarning: true } : {}),
-      runtime: { kind: this.config.runtime, ok: this.runtimeOk, lastError: this.runtimeError, health: this.health() },
+      runtime: {
+        kind: this.config.runtime, ok: this.runtimeOk, lastError: this.runtimeError, health: this.health(), vm: this.lastFacts?.vm ?? null,
+        lifecycle: this.vmDecision ? { action: this.vmDecision.action, reason: this.vmDecision.reason, wakeAt: iso(this.vmDecision.wakeAt) } : null,
+        awake: this.caffeinate ? this.caffeinate.holding : null,
+      },
       runs: [...this.runs.values()].map((run) => ({
         id: run.id, job: run.jobId, phase: run.finished ? "reporting" : run.phase, since: iso(run.phaseAt),
         peakMemoryBytes: run.stats.peakMemoryBytes, waitingToReport: run.finished,
