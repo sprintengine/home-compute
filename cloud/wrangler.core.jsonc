@@ -1,0 +1,19 @@
+// hc-core: the per-minute cron and (from M2) the agent API. It never serves people.
+// See README.md for local development and the deploy steps.
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "hc-core",
+  "main": "src/hc-core.mjs",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  // One of the account's five cron triggers. Changes take up to 15 minutes to propagate.
+  "triggers": { "crons": ["* * * * *"] },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "home-compute",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ]
+}

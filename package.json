@@ -13,7 +13,8 @@
   "homepage": "https://github.com/sprintengine/home-compute#readme",
   "type": "module",
   "workspaces": [
-    "studio-module"
+    "studio-module",
+    "cloud"
   ],
   "bin": {
     "home-compute": "./src/cli.mjs"
