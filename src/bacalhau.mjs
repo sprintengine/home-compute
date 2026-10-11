@@ -4,14 +4,13 @@ import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
 import { resolveTemplate } from "./config.mjs";
+import { jobEnvironmentNames } from "./core/job.mjs";
 
 const execFile = promisify(execFileCallback);
 const TERMINAL_STATES = new Set(["Completed", "Failed", "Stopped", "Cancelled", "Canceled"]);
 
-/** The names of the environment variables a job is given, optional ones first. */
-export function jobEnvironmentNames(job) {
-  return [...new Set([...(job.task.passEnv ?? []), ...(job.task.requiredEnv ?? [])])];
-}
+// Moved to src/core/job.mjs (pure modules must not import this file); re-exported for existing callers.
+export { jobEnvironmentNames };
 
 function environmentVariables(job, environment, redact) {
   const names = jobEnvironmentNames(job);

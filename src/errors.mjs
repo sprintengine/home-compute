@@ -1,7 +1,2 @@
-/** An error the API answers with its own HTTP status. */
-export class HttpError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
+// Moved to src/core so the hosted control plane can share it; kept here for existing imports.
+export * from "./core/errors.mjs";

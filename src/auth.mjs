@@ -1,4 +1,5 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { originMatches } from "./core/csrf.mjs";
 
 const LOOPBACK_PEERS = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 const LOOPBACK_NAMES = new Set(["127.0.0.1", "localhost", "::1"]);
@@ -138,17 +139,7 @@ export class DashboardAuth {
 
   /** Whether the request's Origin is the page it was sent to (the direct or the forwarded host). */
   sameOrigin(request) {
-    const origin = header(request, "origin");
-    if (!origin) return false;
-    let host;
-    try {
-      host = new URL(origin).host.toLowerCase();
-    } catch {
-      return false;
-    }
-    const hosts = [header(request, "host"), header(request, "x-forwarded-host")]
-      .filter(Boolean).map((value) => value.split(",")[0].trim().toLowerCase());
-    return hosts.includes(host);
+    return originMatches(header(request, "origin"), [header(request, "host"), header(request, "x-forwarded-host")]);
   }
 
   /**

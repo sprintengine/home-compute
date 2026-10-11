@@ -2,18 +2,9 @@ import { execFile as execFileCallback } from "node:child_process";
 import path from "node:path";
 import { promisify } from "node:util";
 import { HttpError } from "./errors.mjs";
+import { timetableChange } from "./core/timetable.mjs";
 
 const execFile = promisify(execFileCallback);
-const ID = /^[a-z0-9][a-z0-9-]{0,62}$/;
-const KEYS = new Set(["enabled", "hours", "minutes"]);
-
-function wholeNumbers(values, maximum, name) {
-  if (!Array.isArray(values) || values.length === 0 || values.length > maximum + 1
-    || values.some((value) => !Number.isInteger(value) || value < 0 || value > maximum)) {
-    throw new HttpError(400, `${name} must be a non-empty list of whole numbers from 0 to ${maximum}`);
-  }
-  return [...new Set(values)].sort((a, b) => a - b);
-}
 
 /**
  * The arguments that describe one job's timetable change, after the change
@@ -22,27 +13,11 @@ function wholeNumbers(values, maximum, name) {
  * request's text, and the command runs without a shell.
  */
 export function timetableArguments(job, changes) {
-  if (!changes || typeof changes !== "object" || Array.isArray(changes)) {
-    throw new HttpError(400, "The change must be an object");
-  }
-  const unknown = Object.keys(changes).filter((key) => !KEYS.has(key));
-  if (unknown.length) throw new HttpError(400, `Unknown timetable field ${unknown.join(", ")}`);
-  if (!ID.test(job.id)) throw new HttpError(400, "Invalid job id");
+  const change = timetableChange(job, changes);
   const args = [job.id];
-  if (changes.enabled !== undefined) {
-    if (typeof changes.enabled !== "boolean") throw new HttpError(400, "enabled must be true or false");
-    args.push("--enabled", String(changes.enabled));
-  }
-  if ((changes.hours !== undefined || changes.minutes !== undefined) && !job.schedule?.at) {
-    throw new HttpError(400, `${job.id} runs on an interval, not at set times`);
-  }
-  if (changes.hours !== undefined) {
-    args.push("--hours", changes.hours === "every" ? "every" : wholeNumbers(changes.hours, 23, "hours").join(","));
-  }
-  if (changes.minutes !== undefined) {
-    args.push("--minutes", wholeNumbers(changes.minutes, 59, "minutes").join(","));
-  }
-  if (args.length === 1) throw new HttpError(400, "Nothing to change");
+  if (change.enabled !== undefined) args.push("--enabled", String(change.enabled));
+  if (change.hours !== undefined) args.push("--hours", change.hours === "every" ? "every" : change.hours.join(","));
+  if (change.minutes !== undefined) args.push("--minutes", change.minutes.join(","));
   return args;
 }
 

@@ -1,8 +1,12 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { buildJobSpec } from "./bacalhau.mjs";
-import { parseDuration } from "./config.mjs";
+import { isDue, nextDueAt, nextSlot, previousSlot } from "./core/schedule.mjs";
+import { outcomeOf, parseReports, publishedEntries, reportedError, trackPublished } from "./core/reports.mjs";
 import { redactValue } from "./redact.mjs";
+
+// The slot maths and report parsing live in src/core so the hosted control plane shares them.
+export { isDue, nextDueAt, nextSlot, parseReports, previousSlot };
 
 export async function readState(filename) {
   try {
@@ -19,83 +23,6 @@ export async function writeState(filename, state) {
   const temporary = `${filename}.${process.pid}.tmp`;
   await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
   await rename(temporary, filename);
-}
-
-const HOUR = 3_600_000;
-const DAY = 24 * HOUR;
-
-/** The slot times of an `at` schedule on the UTC day that starts at `dayStart`. */
-function slotsOn(at, dayStart) {
-  const hours = at.hours ?? Array.from({ length: 24 }, (_, hour) => hour);
-  const minutes = at.minutes ?? [0];
-  return hours.flatMap((hour) => minutes.map((minute) => dayStart + hour * HOUR + minute * 60_000))
-    .sort((a, b) => a - b);
-}
-
-function utcDayStart(time) {
-  return Math.floor(time / DAY) * DAY;
-}
-
-/** The latest slot at or before `now`, as epoch milliseconds. */
-export function previousSlot(at, now) {
-  const time = now.getTime();
-  const today = utcDayStart(time);
-  const earlier = slotsOn(at, today).filter((slot) => slot <= time);
-  return earlier.length ? earlier.at(-1) : slotsOn(at, today - DAY).at(-1);
-}
-
-/** The first slot after `time`, as epoch milliseconds. */
-export function nextSlot(at, time) {
-  const today = utcDayStart(time);
-  return slotsOn(at, today).find((slot) => slot > time) ?? slotsOn(at, today + DAY)[0];
-}
-
-export function isDue(job, record, now) {
-  if (job.enabled === false || record?.paused === true) return false;
-  if (job.schedule.at) {
-    // Due once per slot: a slot that passed while the controller was down runs
-    // once on its return, never once per missed slot.
-    if (!record?.lastSubmittedAt) return true;
-    return new Date(record.lastSubmittedAt).getTime() < previousSlot(job.schedule.at, now);
-  }
-  const anchor = record?.lastFinishedAt ?? record?.lastSubmittedAt;
-  if (!anchor) return true;
-  return now.getTime() - new Date(anchor).getTime() >= parseDuration(job.schedule.every);
-}
-
-/** When the job will next be submitted, or null while it is paused or running. */
-export function nextDueAt(job, record, now) {
-  if (job.enabled === false || record?.paused === true || record?.activeJobId) return null;
-  if (isDue(job, record, now)) return now.toISOString();
-  if (job.schedule.at) return new Date(nextSlot(job.schedule.at, now.getTime())).toISOString();
-  const anchor = new Date(record.lastFinishedAt ?? record.lastSubmittedAt).getTime();
-  return new Date(anchor + parseDuration(job.schedule.every)).toISOString();
-}
-
-/** Every line of a workload's output that is a JSON object naming an `event`. */
-export function parseReports(text) {
-  const reports = [];
-  for (const line of String(text ?? "").split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith("{")) continue;
-    try {
-      const value = JSON.parse(trimmed);
-      if (value && typeof value.event === "string") reports.push(value);
-    } catch {
-      // Not every brace-led line is a report.
-    }
-  }
-  return reports.slice(-50);
-}
-
-function outcomeOf(state, exitCode, reports, report) {
-  if (state !== "Completed" || (exitCode !== undefined && exitCode !== 0)
-    || reports.some((entry) => entry.event.endsWith("_failed"))) {
-    return "failed";
-  }
-  if (report?.trackEvent && reports.some((entry) => entry.event === report.trackEvent)) return "published";
-  if (reports.length && reports.every((entry) => entry.event.endsWith("_unchanged"))) return "unchanged";
-  return "completed";
 }
 
 /**
@@ -128,22 +55,14 @@ export async function recordFinished({ job, record, status, client, now }) {
     lastExitCode: status.exitCode ?? null,
     lastOutcome: outcome,
     lastError: outcome === "failed"
-      ? (reports.findLast((entry) => entry.error)?.error ?? status.errorMessage
+      ? (reportedError(reports) ?? status.errorMessage
         ?? (failedExit ? `exited with ${status.exitCode}` : `ended ${status.state}`))
       : undefined,
     activeJobId: undefined,
   });
   if (report?.format === "json-lines") record.lastReports = reports;
   if (report?.trackEvent) {
-    const key = report.trackBy ?? "key";
-    record.published ??= {};
-    for (const entry of reports.filter((candidate) => candidate.event === report.trackEvent)) {
-      record.published[entry[key] ?? job.id] = {
-        run: entry.run ?? null,
-        at: entry.time ?? now.toISOString(),
-        seconds: entry.seconds ?? null,
-      };
-    }
+    record.published = trackPublished(record.published, reports, report, { fallbackKey: job.id, at: now.toISOString() });
   }
   return {
     event: "job_finished",
@@ -214,12 +133,7 @@ export async function settleRun({ job, record, status, client, now, history, red
   if (history) {
     await keepHistory(logger, job.id, async () => {
       const known = await history.find(job.id, event.bacalhauJobId);
-      const trackEvent = job.task.report?.trackEvent;
-      const trackBy = job.task.report?.trackBy ?? "key";
-      const published = trackEvent
-        ? event.reports.filter((entry) => entry.event === trackEvent)
-          .map((entry) => ({ key: String(entry[trackBy] ?? job.id), run: entry.run ?? null, ...(entry.status ? { status: entry.status } : {}) }))
-        : [];
+      const published = publishedEntries(event.reports, job.task.report, job.id);
       await history.record(job.id, event.bacalhauJobId, {
         submittedAt: known?.submittedAt ?? status.timing?.submittedAt ?? submittedAt,
         startedAt: status.timing?.startedAt ?? known?.startedAt,

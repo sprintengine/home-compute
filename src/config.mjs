@@ -1,17 +1,9 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { ENV_NAME, JOB_ID as ID, parseDuration, validateReport, validateSchedule } from "./core/job.mjs";
 
-const DURATION = /^(\d+)(s|m|h|d)$/;
-const ID = /^[a-z0-9][a-z0-9-]{0,62}$/;
-const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
-
-export function parseDuration(value) {
-  const match = typeof value === "string" && value.match(DURATION);
-  if (!match) throw new Error(`Invalid duration ${JSON.stringify(value)}; use 30s, 15m, 2h, or 1d`);
-  const amount = Number(match[1]);
-  if (amount === 0) throw new Error("Duration must be greater than zero");
-  return amount * { s: 1_000, m: 60_000, h: 3_600_000, d: 86_400_000 }[match[2]];
-}
+// The schedule and duration rules live in src/core so the hosted control plane shares them.
+export { parseDuration, validateSchedule };
 
 export async function readEnvFile(filename) {
   if (!filename) return {};
@@ -35,47 +27,6 @@ export async function readEnvFile(filename) {
 
 function assertString(value, description) {
   if (typeof value !== "string" || !value.trim()) throw new Error(`${description} must be a non-empty string`);
-}
-
-function assertWholeNumbers(values, maximum, description) {
-  if (!Array.isArray(values) || values.length === 0
-    || values.some((value) => !Number.isInteger(value) || value < 0 || value > maximum)) {
-    throw new Error(`${description} must be a non-empty array of whole numbers from 0 to ${maximum}`);
-  }
-}
-
-/**
- * A schedule is either an interval from the previous completion (`every`), or
- * wall-clock slots (`at`) for work that follows someone else's timetable, such
- * as a data source that publishes at fixed times. Slots are UTC, the only zone
- * accepted, so a schedule never shifts with daylight saving.
- */
-export function validateSchedule(schedule, description) {
-  if (!schedule || typeof schedule !== "object" || Array.isArray(schedule)) {
-    throw new Error(`${description} must be an object`);
-  }
-  if ((schedule.every === undefined) === (schedule.at === undefined)) {
-    throw new Error(`${description} needs exactly one of every or at`);
-  }
-  if (schedule.every !== undefined) {
-    parseDuration(schedule.every);
-    return;
-  }
-  const { at } = schedule;
-  if (!at || typeof at !== "object" || Array.isArray(at)) throw new Error(`${description}.at must be an object`);
-  if (at.hours !== undefined) assertWholeNumbers(at.hours, 23, `${description}.at.hours`);
-  if (at.minutes !== undefined) assertWholeNumbers(at.minutes, 59, `${description}.at.minutes`);
-  if (schedule.timezone !== undefined && schedule.timezone !== "UTC") {
-    throw new Error(`${description}.timezone must be UTC`);
-  }
-}
-
-function validateReport(report, description) {
-  if (report === undefined) return;
-  if (!report || typeof report !== "object" || Array.isArray(report)) throw new Error(`${description} must be an object`);
-  if (report.format !== "json-lines") throw new Error(`${description}.format must be json-lines`);
-  if (report.trackEvent !== undefined) assertString(report.trackEvent, `${description}.trackEvent`);
-  if (report.trackBy !== undefined) assertString(report.trackBy, `${description}.trackBy`);
 }
 
 export function validateConfig(config, filename = "configuration") {
