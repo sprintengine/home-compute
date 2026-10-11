@@ -14,12 +14,12 @@ profile="${HC_TEST_PROFILE:-hc-test}"
 if [ "$profile" = default ]; then echo "with-test-colima: refusing to use the default profile" >&2; exit 2; fi
 if [ $# -eq 0 ]; then echo "usage: $0 COMMAND [ARGS…]" >&2; exit 2; fi
 if colima list --json 2>/dev/null | grep -q "\"name\":\"$profile\""; then
-  echo "with-test-colima: profile $profile already exists; delete it first (colima delete $profile --force)" >&2
+  echo "with-test-colima: profile $profile already exists; delete it first (colima delete $profile --force --data)" >&2
   exit 2
 fi
 cleanup() {
   colima stop "$profile" >/dev/null 2>&1 || colima stop --force "$profile" >/dev/null 2>&1 || true
-  colima delete "$profile" --force >/dev/null 2>&1 || true
+  colima delete "$profile" --force --data >/dev/null 2>&1 || true
   echo "with-test-colima: profile $profile stopped and deleted" >&2
 }
 trap cleanup EXIT INT TERM

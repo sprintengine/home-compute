@@ -590,6 +590,8 @@ and probes, 2026-10-11): creating the profile 13.7–28.8 s, starting a stopped 
 stopping it about 3 s; the `com.apple.Virtualization.VirtualMachine` process's footprint was
 about 750 MB just after boot and up to about 980 MB (RSS 1.1–1.3 GiB) while running a job that
 held 200 MiB. A VM's memory is not given back while it runs, so the idle stop is what frees it.
+Colima 0.10 keeps a deleted profile's Docker data disk (`~/.colima/_lima/_disks/colima-<profile>`)
+unless `colima delete` is given `--data`; uninstall's `--purge-runtime` (§6) needs it.
 
 What this saves with Wingfoil's **current** timetable (every enabled job at 0.5–1 GiB; hourly
 slots at :05 blend, :10 prune, :15 forecast-archive (+ sea-temperature, mi-swan), :50 wind-obs):

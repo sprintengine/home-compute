@@ -34,7 +34,7 @@ COLIMA_DIR="${COLIMA_HOME:-$HOME/.colima}"
 
 [ "$PROFILE" = default ] && { echo "refusing to use the default profile" >&2; exit 2; }
 if colima list --json 2>/dev/null | grep -q "\"name\":\"$PROFILE\""; then
-  echo "profile $PROFILE already exists; delete it first (colima delete $PROFILE --force)" >&2
+  echo "profile $PROFILE already exists; delete it first (colima delete $PROFILE --force --data)" >&2
   exit 2
 fi
 command -v docker >/dev/null || { echo "the docker CLI is needed (brew install docker)" >&2; exit 2; }
@@ -79,7 +79,7 @@ cleanup() {
   sleep 1
   for pid in "${PIDS[@]}"; do pkill -KILL -P "$pid" 2>/dev/null; kill -KILL "$pid" 2>/dev/null; done
   colima stop "$PROFILE" >/dev/null 2>&1 || colima stop --force "$PROFILE" >/dev/null 2>&1
-  colima delete "$PROFILE" --force >/dev/null 2>&1
+  colima delete "$PROFILE" --force --data >/dev/null 2>&1
   say "profile $PROFILE deleted; logs kept in $WORK"
   colima list
   [ "$(docker context show 2>/dev/null)" = "$CONTEXT_BEFORE" ] && say "docker context unchanged: $CONTEXT_BEFORE" || say "WARNING: the docker context changed"
