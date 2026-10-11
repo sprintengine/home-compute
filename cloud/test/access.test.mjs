@@ -123,9 +123,17 @@ describe("hc-web authentication and roles", () => {
   it("takes DEV_ACCESS_EMAIL only on localhost, for wrangler dev", async () => {
     const devEnv = { ...env, DEV_ACCESS_EMAIL: "dev@example.com", BOOTSTRAP_ADMINS: "dev@example.com" };
     const local = await handle(new Request("http://localhost:8787/v1/session"), devEnv);
-    expect(await local.json()).toMatchObject({ authenticated: true, login: "dev@example.com", role: "admin" });
+    const session = await local.json();
+    expect(session).toMatchObject({ authenticated: true, login: "dev@example.com", role: "admin" });
+    expect(session.csrfToken, "the dashboard's own GET has no Origin but still needs its token").toBeTruthy();
     const deployed = await handle(new Request("https://hc-web.example.workers.dev/v1/session", { headers: { host: "localhost" } }), devEnv);
     expect(deployed.status).toBe(401);
+    // A local script (no Origin) may change things; a page from another origin still may not.
+    const json = { "content-type": "application/json" };
+    expect((await handle(new Request("http://localhost:8787/v1/pause-all", { method: "POST", headers: json, body: "{}" }), devEnv)).status).toBe(200);
+    const page = await handle(new Request("http://localhost:8787/v1/resume-all",
+      { method: "POST", headers: { ...json, origin: "https://evil.example" }, body: "{}" }), devEnv);
+    expect(page.status).toBe(403);
   });
 
   it("accepts a service token's mutation without CSRF (it is not a browser), but only as JSON", async () => {

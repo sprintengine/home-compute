@@ -90,8 +90,10 @@ async function respond(request, env, now) {
   }
   const { roles } = await readSettings(env.DB, ["roles"]);
   const role = roleOf(identity.login, { roles, bootstrapAdmins: env.BOOTSTRAP_ADMINS });
-  const browser = identity.kind === "user";
-  const csrfToken = browser ? await csrfTokenFor(identity, env.CSRF_KEY) : null;
+  // As with the local controller's tokenless local client, a dev request without an Origin (curl, the CLI) is not a browser.
+  const browser = identity.kind === "user" && !(identity.dev && !request.headers.get("origin"));
+  // Every person gets a token (a page's own GETs carry no Origin); only service tokens never need one.
+  const csrfToken = identity.kind === "user" ? await csrfTokenFor(identity, env.CSRF_KEY) : null;
 
   if (url.pathname === "/v1/session") {
     if (request.method !== "GET") return json(405, { error: "method_not_allowed" });

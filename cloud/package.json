@@ -7,7 +7,7 @@
   "scripts": {
     "test": "vitest run && node --test 'test-node/*.test.mjs'",
     "dev:web": "wrangler dev -c wrangler.web.jsonc --persist-to .wrangler/state",
-    "dev:core": "wrangler dev -c wrangler.core.jsonc --persist-to .wrangler/state --test-scheduled --port 8788",
+    "dev:core": "wrangler dev -c wrangler.core.jsonc --persist-to .wrangler/state --test-scheduled --port 8788 --inspector-port 9230",
     "migrate:local": "wrangler d1 migrations apply home-compute --local -c wrangler.web.jsonc --persist-to .wrangler/state",
     "build": "wrangler deploy --dry-run -c wrangler.web.jsonc --outdir dist/web && wrangler deploy --dry-run -c wrangler.core.jsonc --outdir dist/core"
   },
