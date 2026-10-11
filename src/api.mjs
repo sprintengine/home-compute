@@ -75,11 +75,14 @@ function events(request, response, service) {
     response.write(`event: ${event.event}\ndata: ${JSON.stringify(event)}\n\n`);
   });
   // A comment line now and then keeps idle proxies and phones from dropping the stream.
-  const heartbeat = setInterval(() => response.write(": keepalive\n\n"), 25_000);
-  request.once("close", () => {
+  // Unref'd, so an open stream never keeps a stopping controller alive.
+  const heartbeat = setInterval(() => response.write(": keepalive\n\n"), 25_000).unref();
+  const finish = () => {
     clearInterval(heartbeat);
     unsubscribe();
-  });
+  };
+  request.once("close", finish);
+  response.once("close", finish);
 }
 
 /**
