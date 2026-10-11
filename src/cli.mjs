@@ -5,6 +5,7 @@ import path from "node:path";
 import process from "node:process";
 import { BacalhauClient, buildJobSpec } from "./bacalhau.mjs";
 import { createApiServer } from "./api.mjs";
+import { cloudCommand } from "./cloud-cli.mjs";
 import { dashboardSettings, loadConfig, parseDuration, readEnvFile } from "./config.mjs";
 import { readState } from "./scheduler.mjs";
 import { HomeComputeService } from "./service.mjs";
@@ -18,6 +19,7 @@ Usage:
   home-compute daemon [--config FILE] [--env-file FILE] [--state FILE] [--once] [--no-api]
   home-compute status [--config FILE] [--state FILE] [--live]
   home-compute doctor [--config FILE] [--env-file FILE]
+  home-compute cloud import FILE [--preset NAME] [--image REF] [--dry-run]   (see: home-compute cloud help)
 
 Defaults: ./home-compute.json and ./.home-compute/state.json. Secret values come
 from the process environment or an ignored env file. Configuration contains only
@@ -216,6 +218,10 @@ async function doctor({ config, environment }) {
 }
 
 async function main() {
+  if (process.argv[2] === "cloud") {
+    await cloudCommand(process.argv.slice(3));
+    return;
+  }
   const options = parseArgs(process.argv.slice(2));
   if (["help", "--help", "-h"].includes(options.command)) {
     console.log(HELP);
