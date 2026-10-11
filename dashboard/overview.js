@@ -121,16 +121,19 @@ export function sparkline(durations, { width = 132, height = 30 } = {}) {
 
 function jobCard(job, now) {
   const status = jobState(job);
-  const finishedAt = job.lastFinishedAt;
+  // The local controller's snapshot may know a finished run only from its recent runs.
+  const last = (job.recentRuns ?? []).find((run) => run.finishedAt);
+  const finishedAt = job.lastFinishedAt ?? last?.finishedAt;
+  const outcome = job.lastOutcome ?? last?.outcome;
   const published = Object.entries(job.published ?? {});
-  const problem = job.lastOutcome === "failed";
+  const problem = outcome === "failed";
   return h("a", { class: `job${problem ? " attention" : ""}${["running", "queued"].includes(status) ? " running" : ""}`, href: jobHref(job.id) },
     h("div", { class: "row between" }, h("span", { class: "job-name grow" }, job.id), job.blocked ? chip({ label: "Blocked", tone: "warning", icon: "⊘" }, job.blocked) : null, job.blocked && status === "idle" ? null : stateChip(job)),
     job.description ? h("div", { class: "job-desc" }, job.description) : null,
     h("div", { class: "job-lines" },
       h("div", { class: "line schedule" }, scheduleLine(job.schedule, now)),
       finishedAt
-        ? h("div", { class: "line" }, outcomeChip(job.lastOutcome, job.lastFinishedState), h("span", {}, `${when(finishedAt)} (${relative(finishedAt, now)})`))
+        ? h("div", { class: "line" }, outcomeChip(outcome, job.lastFinishedState ?? last?.state), h("span", {}, `${when(finishedAt)} (${relative(finishedAt, now)})`))
         : h("div", { class: "line muted" }, "Not run yet"),
       problem && job.lastError ? h("div", { class: "error-text clamp" }, job.lastError) : null,
       published.length ? h("div", { class: "line published" }, published.map(([model, entry], index) => [
