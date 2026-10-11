@@ -279,6 +279,8 @@ export class ColimaRuntime {
           await this.#start(decision.size, decision.reason);
         } else if (decision.action === "stop") {
           await this.docker.idle().catch(() => {});
+          // A claim may have arrived while old images were pruned: then the VM stays.
+          if (this.context.busy || this.active.size > 0) return { action: "none", reason: "work arrived before the idle stop", wakeAt: null };
           await this.#stopVm(decision.reason);
         }
       } catch (error) {

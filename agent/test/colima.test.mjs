@@ -138,6 +138,15 @@ test("tick never stops a VM with a run in it, and a run in flight counts before 
   assert.equal((await runtime.tick()).action, "none", "a container runs");
   runtime.released("r_01J0000000000000000000000D");
   runtime.lastBusyAt = 0;
+  const idle = runtime.docker.idle.bind(runtime.docker);
+  runtime.docker.idle = async () => {
+    runtime.setContext({ busy: true });
+    return idle();
+  };
+  assert.match((await runtime.tick()).reason, /work arrived before the idle stop/, "a claim during the prune keeps it");
+  runtime.docker.idle = idle;
+  runtime.setContext({ busy: false });
+  runtime.lastBusyAt = 0;
   assert.equal((await runtime.tick()).action, "stop");
 });
 
