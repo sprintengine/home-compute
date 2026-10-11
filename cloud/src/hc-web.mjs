@@ -26,6 +26,10 @@ const ROUTES = [
   ["PATCH", `/v1/jobs/${JOB}/timetable`, "operator", api.patchTimetable],
   // The local controller's verb, which today's dashboard and menu bar app send.
   ["POST", `/v1/jobs/${JOB}/timetable`, "operator", api.patchTimetable],
+  ["PATCH", `/v1/jobs/${JOB}/placement`, "operator", (context) => api.patchDefinition(context, "placement")],
+  ["PATCH", `/v1/jobs/${JOB}/resources`, "operator", (context) => api.patchDefinition(context, "resources")],
+  // What runs is an admin's choice: an operator may move and size work, not change it.
+  ["PATCH", `/v1/jobs/${JOB}/image`, "admin", (context) => api.patchDefinition(context, "image")],
   ["POST", `/v1/jobs/${JOB}/run`, "operator", api.runJob],
   ["POST", `/v1/jobs/${JOB}/pause`, "operator", (context) => api.setPaused(context, true)],
   ["POST", `/v1/jobs/${JOB}/resume`, "operator", (context) => api.setPaused(context, false)],
@@ -36,6 +40,7 @@ const ROUTES = [
   ["POST", `/v1/runs/${RUN}/retry`, "operator", api.retryRun],
   ["GET", "/v1/machines", "viewer", fleet.listMachines],
   ["GET", `/v1/machines/${MACHINE}`, "viewer", fleet.getMachine],
+  ["GET", `/v1/machines/${MACHINE}/runs`, "viewer", fleet.machineRuns],
   // Drain is an operator's; anything else in the body needs an admin (checked in the handler).
   ["PATCH", `/v1/machines/${MACHINE}`, "operator", fleet.patchMachine],
   ["DELETE", `/v1/machines/${MACHINE}`, "admin", fleet.revokeMachine],

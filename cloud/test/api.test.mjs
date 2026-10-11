@@ -239,16 +239,21 @@ describe("overview", () => {
     expect((await call("/v1/audit", { identity: "op@example.com" })).status).toBe(403);
   });
 
-  it("keeps settings: global pause, retention and roles, each change audited", async () => {
+  it("keeps settings: global pause, retention, roles and the desired agent version, each change audited", async () => {
     const initial = await call("/v1/settings");
-    expect(initial.body).toEqual({ globalPause: false, retention: expect.objectContaining({ runDays: 180, keepRunsPerJob: 50 }), roles: {} });
+    expect(initial.body).toEqual({
+      globalPause: false, retention: expect.objectContaining({ runDays: 180, keepRunsPerJob: 50 }), roles: {}, desiredAgentVersion: null,
+    });
     const changed = await call("/v1/settings", { method: "PATCH", body: { retention: { runDays: 90 }, globalPause: true } });
     expect(changed.body).toMatchObject({ globalPause: true, retention: { runDays: 90, skippedDays: 14 }, changed: ["retention", "globalPause"] });
     expect((await call("/v1/settings", { method: "PATCH", body: { globalPause: true } })).body.changed).toEqual([]);
     expect((await call("/v1/settings", { method: "PATCH", body: { retention: { runDays: 0 } } })).status).toBe(400);
     expect((await call("/v1/settings", { method: "PATCH", body: { roles: { "me@example.com": "god" } } })).status).toBe(400);
     expect((await call("/v1/settings", { method: "PATCH", body: { vault: 1 } })).status).toBe(400);
+    expect((await call("/v1/settings", { method: "PATCH", body: { desiredAgentVersion: "latest" } })).status).toBe(400);
     expect((await audit()).map((entry) => entry.action)).toEqual(["settings.update"]);
+    expect((await call("/v1/settings", { method: "PATCH", body: { desiredAgentVersion: "0.3.0" } })).body.desiredAgentVersion).toBe("0.3.0");
+    expect((await call("/v1/settings", { method: "PATCH", body: { desiredAgentVersion: null } })).body.desiredAgentVersion).toBe(null);
     expect((await call("/v1/snapshot")).body.controller.globalPause).toBe(true);
   });
 

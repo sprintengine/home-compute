@@ -6,12 +6,16 @@
 import { summarizeRun } from "../../src/core/history.mjs";
 import { claimBlockers, labelsMatch, machineAvailable, unhealthyReason } from "../../src/core/placement.mjs";
 import { OFFLINE_MS } from "../../src/core/protocol.mjs";
-import { upcomingAt } from "../../src/core/schedule.mjs";
+import { nextSlot, upcomingAt } from "../../src/core/schedule.mjs";
 import { iso } from "./http.mjs";
 import { jobFromRow, machineFromRow, NON_TERMINAL_SQL, runFromRow } from "./db.mjs";
 
 const RECENT_RUNS = 5;
+/** Runs per job read for the overview's duration sparkline; `recentRuns` keeps its 5. */
+const SPARKLINE_RUNS = 20;
 const RECENT_RUNS_ALL = 20;
+const UPCOMING_SLOTS = 6;
+const LOST_WINDOW_MS = 24 * 3_600_000;
 const CLOCK_SKEW_WARNING_MS = 30_000;
 /** Hosted states in the local controller's (Bacalhau's) words, which existing clients understand. */
 const CLIENT_STATE = {
@@ -88,12 +92,33 @@ function clientSchedule(schedule) {
   return schedule.at ? { at: schedule.at, timezone: "UTC" } : schedule;
 }
 
+/** Whether dotted version `a` is older than `b` (`0.2.0` < `0.10.0`). */
+export function olderVersion(a, b) {
+  if (typeof a !== "string" || typeof b !== "string") return false;
+  const left = a.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  const right = b.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    if ((left[index] ?? 0) !== (right[index] ?? 0)) return (left[index] ?? 0) < (right[index] ?? 0);
+  }
+  return false;
+}
+
+/**
+ * The agent version machines should run: the `desiredAgentVersion` setting,
+ * else the newest any enrolled machine runs (so one left behind stands out).
+ */
+export function desiredAgentVersion(setting, rows) {
+  if (typeof setting === "string" && setting) return setting;
+  return rows.map((row) => row.agent_version).filter(Boolean).reduce((newest, version) => (!newest || olderVersion(newest, version) ? version : newest), null);
+}
+
 /**
  * A machine as clients see it: its status (online, offline, draining,
- * unhealthy or revoked), VM, caps, labels, agent, clock skew and current
- * runs. `runs` are run rows; those this machine holds are listed.
+ * unhealthy or revoked), VM (with when it last changed state and when it ran
+ * in the last 24 hours), caps, labels, agent, clock skew and current runs.
+ * `runs` are run rows; those this machine holds are listed.
  */
-export function machineView(row, now, runs = []) {
+export function machineView(row, now, runs = [], { desiredVersion = null } = {}) {
   const machine = machineFromRow(row);
   const online = machine.lastSeenAt !== null && now - machine.lastSeenAt <= OFFLINE_MS;
   const unhealthy = unhealthyReason(machine.health);
@@ -102,7 +127,8 @@ export function machineView(row, now, runs = []) {
   else if (!online) status = "offline";
   else if (machine.drain || machine.health.localDrain) status = "draining";
   else if (unhealthy) status = "unhealthy";
-  const { vm = null, free = null, ...facts } = machine.facts;
+  const { vm = null, free = null, vmSince = null, vmHistory = [], ...facts } = machine.facts;
+  const updateAvailable = !machine.revokedAt && olderVersion(machine.agentVersion, desiredVersion);
   return {
     id: machine.id,
     name: machine.name,
@@ -112,10 +138,13 @@ export function machineView(row, now, runs = []) {
     capabilities: machine.capabilities,
     capacity: machine.capacity,
     vm,
+    vmSince: iso(vmSince),
+    vmHistory: vmHistory.map((span) => ({ from: iso(span.from), to: iso(span.to) })),
     free,
     facts,
     health: machine.health,
     agentVersion: machine.agentVersion,
+    ...(updateAvailable ? { updateAvailable: true, desiredAgentVersion: desiredVersion } : {}),
     drain: machine.drain,
     localDrain: Boolean(machine.health.localDrain),
     lastSeenAt: iso(machine.lastSeenAt),
@@ -160,16 +189,66 @@ export function waitingReason(job, run, machines, now, { globalPause }) {
 }
 
 /**
- * The whole overview in one batch of five indexed reads. Recent runs are a
+ * Which machine a job's next run would most likely go to, or why none can:
+ * hc-core's placement rules without capacity, which changes by the minute.
+ */
+export function expectedMachine(job, machines, now) {
+  const blockers = claimBlockers(job);
+  if (blockers.length) return { machine: null, note: `blocked: ${blockers.join("; ")}` };
+  const required = job.placement?.requireLabels ?? {};
+  const matching = machines.filter((machine) => !machine.revokedAt && labelsMatch(required, machine.labels));
+  if (!matching.length) {
+    const labels = Object.entries(required).map(([key, value]) => `${key}=${value}`).join(", ");
+    return { machine: null, note: labels ? `no machine has labels ${labels}` : "no machine enrolled" };
+  }
+  const preferred = job.placement?.preferMachines ?? [];
+  const available = matching.filter((machine) => machineAvailable(machine, now));
+  const pick = available.find((machine) => preferred.includes(machine.name)) ?? available[0];
+  if (!pick) return { machine: null, note: "no machine online" };
+  if (preferred.length && !preferred.includes(pick.name)) return { machine: pick.name, note: `preferred ${preferred.join(", ")} unavailable` };
+  return { machine: pick.name };
+}
+
+/**
+ * The next `count` slots across all jobs, soonest first, each with the
+ * machine expected to take it. `next` is each job's own next due time
+ * (upcomingAt); an `at` job's later slots follow from its timetable.
+ */
+export function upcomingSlots(jobs, next, machines, now, { globalPause = false, count = UPCOMING_SLOTS } = {}) {
+  if (globalPause) return [];
+  const slots = [];
+  for (const job of jobs) {
+    if (!job.schedule || !job.enabled || job.paused) continue;
+    const first = next.get(job.id);
+    if (job.schedule.at) {
+      let time = first ?? nextSlot(job.schedule.at, now);
+      for (let index = 0; index < count; index += 1) {
+        slots.push({ job, at: time });
+        time = nextSlot(job.schedule.at, time);
+      }
+    } else if (first !== null && first !== undefined) {
+      slots.push({ job, at: first });
+    }
+  }
+  slots.sort((a, b) => a.at - b.at || a.job.id.localeCompare(b.job.id));
+  const expected = new Map();
+  return slots.slice(0, count).map(({ job, at }) => {
+    if (!expected.has(job.id)) expected.set(job.id, expectedMachine(job, machines, now));
+    return { job: job.id, at: iso(at), ...expected.get(job.id) };
+  });
+}
+
+/**
+ * The whole overview in one batch of indexed reads. Recent runs are a
  * correlated `IN (… LIMIT 5)` per job, which SQLite answers from runs_by_job;
  * a UNION ALL per job would hit D1's limit on compound SELECTs.
  */
 export async function buildSnapshot(db, now) {
-  const [jobs, open, settings, machines, recentRows, lastReportRows, latestRows] = await db.batch([
+  const [jobs, open, settings, machines, recentRows, lastReportRows, latestRows, durationRows, lostRows] = await db.batch([
     db.prepare(`SELECT j.*, s.last_slot_at, s.last_finished_at, s.published_json AS state_published_json
       FROM jobs j LEFT JOIN schedule_state s ON s.job_id = j.id ORDER BY j.id`),
     db.prepare(`SELECT ${RUN_LIST_COLUMNS} FROM runs WHERE state IN (${NON_TERMINAL_SQL})`),
-    db.prepare("SELECT key, value_json FROM settings WHERE key IN ('global_pause', 'jobs_version')"),
+    db.prepare("SELECT key, value_json FROM settings WHERE key IN ('global_pause', 'jobs_version', 'desired_agent_version')"),
     db.prepare(`SELECT id, name, labels_json, capabilities, capacity_json, facts_json, health_json, agent_version, drain, last_seen_at,
         last_ip, clock_skew_ms, enrolled_at, revoked_at, credential_issued_at, rotate_requested_at,
         credential_next_hash IS NOT NULL AS rotation_pending
@@ -180,6 +259,11 @@ export async function buildSnapshot(db, now) {
     db.prepare("SELECT s.job_id, r.reports_json FROM schedule_state s JOIN runs r ON r.id = s.last_run_id WHERE r.reports_json IS NOT NULL"),
     // The latest changes across jobs, newest first (runs_by_updated).
     db.prepare(`SELECT ${RUN_LIST_COLUMNS} FROM runs WHERE state != 'skipped' ORDER BY updated_at DESC LIMIT ${RECENT_RUNS_ALL}`),
+    // The dashboard's duration sparkline: each job's last finished runs, a few narrow columns only.
+    db.prepare(`SELECT r.id, r.job_id, r.state, r.outcome, r.started_at, r.finished_at, r.duration_ms FROM jobs j JOIN runs r ON r.id IN
+      (SELECT id FROM runs WHERE job_id = j.id AND state IN ('succeeded', 'failed', 'timed-out') ORDER BY due_at DESC LIMIT ${SPARKLINE_RUNS})`),
+    // Runs lost in the last day (runs_by_state), for the dashboard's attention list.
+    db.prepare(`SELECT ${RUN_LIST_COLUMNS} FROM runs WHERE state = 'lost' AND due_at >= ? ORDER BY due_at DESC LIMIT 20`).bind(now - LOST_WINDOW_MS),
   ]);
   const setting = Object.fromEntries(settings.results.map((row) => [row.key, JSON.parse(row.value_json)]));
   const globalPause = setting.global_pause === true;
@@ -199,6 +283,12 @@ export async function buildSnapshot(db, now) {
     recent.get(row.job_id).push(view(row));
   }
   const lastReports = new Map(lastReportRows.results.map((row) => [row.job_id, JSON.parse(row.reports_json)]));
+  const durations = new Map();
+  for (const row of durationRows.results) {
+    if (!durations.has(row.job_id)) durations.set(row.job_id, []);
+    durations.get(row.job_id).push(row);
+  }
+  const nextByJob = new Map();
   const jobsById = new Map();
   for (const runs of recent.values()) runs.sort((a, b) => Date.parse(b.submittedAt) - Date.parse(a.submittedAt));
   const jobViews = jobs.results.map((row) => {
@@ -215,6 +305,7 @@ export async function buildSnapshot(db, now) {
       lastSlotAt: row.last_slot_at, lastFinishedAt: row.last_finished_at,
       due: due ? { id: due.id, dueAt: due.due_at } : null, active,
     }, now, { globalPause });
+    nextByJob.set(job.id, job.schedule?.at ? nextSlot(job.schedule.at, Math.max(now, row.last_slot_at ?? now)) : next);
     const view = {
       id: job.id,
       enabled: job.enabled && !job.paused,
@@ -224,6 +315,7 @@ export async function buildSnapshot(db, now) {
       image: job.image,
       parameters: job.args,
       resources: job.resources,
+      placement: job.placement,
       labels: job.labels,
       preset: job.preset,
       revision: job.revision,
@@ -251,11 +343,19 @@ export async function buildSnapshot(db, now) {
       ...(blocked.length ? { blocked: blocked.join("; ") } : {}),
       nextDueAt: iso(next),
       recentRuns: runs.map(summarizeRun),
+      // Oldest first, for a sparkline: when each finished, how long it ran, how it ended.
+      durations: (durations.get(job.id) ?? []).sort((a, b) => (a.finished_at ?? 0) - (b.finished_at ?? 0)).map((run) => ({
+        id: run.id,
+        at: iso(run.finished_at),
+        seconds: seconds(run.duration_ms ?? between(run.started_at, run.finished_at)) ?? null,
+        outcome: run.outcome ?? (run.state === "succeeded" ? "completed" : "failed"),
+      })),
       runsUrl: `/v1/jobs/${job.id}/runs`,
     };
     return view;
   });
-  const machineViews = machines.results.map((row) => machineView(row, now, open.results));
+  const desiredVersion = desiredAgentVersion(setting.desired_agent_version, machines.results);
+  const machineViews = machines.results.map((row) => machineView(row, now, open.results, { desiredVersion }));
   const activeRuns = open.results.map((row) => {
     const run = view(row);
     const job = jobsById.get(row.job_id);
@@ -268,7 +368,7 @@ export async function buildSnapshot(db, now) {
       status: "online",
       kind: "hosted",
       pollEvery: "60s",
-      features: ["history", "logs", "timetable", "machines", "import", "audit"],
+      features: ["history", "logs", "timetable", "machines", "import", "audit", "changes", "settings", "job-parts", "machine-runs"],
       globalPause,
     },
     timetable: { editable: true },
@@ -276,6 +376,11 @@ export async function buildSnapshot(db, now) {
     machines: machineViews,
     activeRuns,
     recentRuns: latestRows.results.map(view),
+    // The next slots across jobs, each with the machine expected to take it.
+    upcoming: upcomingSlots([...jobsById.values()], nextByJob, machineObjects, now, { globalPause }),
+    // Runs whose machine went quiet in the last day; a later finished run of the job settles them for people.
+    lostRuns: lostRows.results.map(view),
+    desiredAgentVersion: desiredVersion,
     // The local controller's Bacalhau node list, in the shape existing clients decode.
     nodes: machineViews.map((machine) => ({
       ...machine,

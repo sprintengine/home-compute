@@ -6,9 +6,9 @@
 import { normaliseLabels } from "../../src/core/job.mjs";
 import { allows } from "./access.mjs";
 import { auditStatement, bumpMachinesVersion, machineFromRow } from "./db.mjs";
-import { HttpError, iso, json, readJson } from "./http.mjs";
+import { HttpError, integerParam, iso, json, readJson } from "./http.mjs";
 import { checkCapabilities, checkCaps, checkMachineName, joinTokenStatements } from "./machines.mjs";
-import { machineView, RUN_LIST_COLUMNS } from "./snapshot.mjs";
+import { clientRun, desiredAgentVersion, machineView, RUN_LIST_COLUMNS } from "./snapshot.mjs";
 import { ACTIVE_SQL } from "./db.mjs";
 
 const MACHINE_COLUMNS = `id, name, labels_json, capabilities, capacity_json, facts_json, health_json, agent_version, drain, last_seen_at,
@@ -30,6 +30,16 @@ async function requireMachine(db, id) {
 async function nameTaken(db, name, exceptId = null) {
   const row = await db.prepare("SELECT id FROM machines WHERE name = ? AND revoked_at IS NULL AND id != ?").bind(name, exceptId ?? "").first();
   return Boolean(row);
+}
+
+/** The agent version machines should run (the setting, else the newest enrolled), for "needs update". */
+async function desiredVersion(db) {
+  const [setting, versions] = await db.batch([
+    db.prepare("SELECT value_json FROM settings WHERE key = 'desired_agent_version'"),
+    db.prepare("SELECT agent_version FROM machines WHERE revoked_at IS NULL"),
+  ]);
+  const value = setting.results[0] ? JSON.parse(setting.results[0].value_json) : null;
+  return desiredAgentVersion(value, versions.results);
 }
 
 async function activeRunsOf(db, machineId = null) {
@@ -65,16 +75,41 @@ export async function createJoinToken({ db, env, request, identity, ip, now }) {
 /** GET /v1/machines?all=1: enrolled machines (revoked ones too with `all`), each with its active runs. */
 export async function listMachines({ db, url, now }) {
   const all = ["1", "true"].includes(url.searchParams.get("all") ?? "");
-  const [machines, runs] = await Promise.all([
+  const [machines, runs, version] = await Promise.all([
     db.prepare(`SELECT ${MACHINE_COLUMNS} FROM machines ${all ? "" : "WHERE revoked_at IS NULL"} ORDER BY name`).all(),
     activeRunsOf(db),
+    desiredVersion(db),
   ]);
-  return json(200, { machines: machines.results.map((row) => machineView(row, now, runs)) });
+  return json(200, { machines: machines.results.map((row) => machineView(row, now, runs, { desiredVersion: version })) });
 }
 
 export async function getMachine({ db, params, now }) {
   const row = await requireMachine(db, params.id);
-  return json(200, machineView(row, now, await activeRunsOf(db, row.id)));
+  const [runs, version] = await Promise.all([activeRunsOf(db, row.id), desiredVersion(db)]);
+  return json(200, machineView(row, now, runs, { desiredVersion: version }));
+}
+
+const DAY_MS = 86_400_000;
+/** Runs claimed this long before the window can still overlap it. */
+const LONGEST_RUN_MS = 12 * 3_600_000;
+
+/**
+ * GET /v1/machines/:id/runs?since=: what the machine ran from `since` (epoch
+ * ms, default 24 hours ago) until now, newest first, for its timeline. A run
+ * claimed before `since` is included while it was still going at `since`.
+ */
+export async function machineRuns({ db, params, url, now }) {
+  const row = await requireMachine(db, params.id);
+  const since = integerParam(url, "since", { fallback: now - DAY_MS, minimum: now - 31 * DAY_MS, maximum: now });
+  const { results } = await db.prepare(`SELECT ${RUN_LIST_COLUMNS} FROM runs
+    WHERE machine_id = ? AND claimed_at >= ? ORDER BY claimed_at DESC LIMIT 500`).bind(row.id, since - LONGEST_RUN_MS).all();
+  const names = new Map([[row.id, row.name]]);
+  return json(200, {
+    machine: row.id,
+    name: row.name,
+    since: iso(since),
+    runs: results.filter((run) => (run.finished_at ?? now) >= since).map((run) => clientRun(run, names)),
+  });
 }
 
 const ADMIN_FIELDS = ["name", "labels", "capacity", "capabilities", "rotateCredential"];

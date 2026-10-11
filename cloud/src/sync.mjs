@@ -156,11 +156,33 @@ function possibleJobs(jobs, machine, globalPause) {
   return { any, manual };
 }
 
+const VM_HISTORY_MS = 24 * 3_600_000;
+const VM_HISTORY_MAX = 48;
+
+/**
+ * When the machine's VM last changed state (`vmSince`) and when it ran over
+ * the last 24 hours (`vmHistory`: `[{from, to}]`, `to` null while it runs),
+ * from the states its syncs report, stamped with the server's time (§4.4: the
+ * dashboard measures VM uptime per machine). Only a change of state changes
+ * these, and a change of state already writes the row, so this adds no writes.
+ */
+export function vmTimeline(previous, vm, now) {
+  const before = previous?.vm?.state ?? null;
+  const after = vm?.state ?? null;
+  let history = Array.isArray(previous?.vmHistory) ? previous.vmHistory : [];
+  if (before === after) return previous?.vmSince === undefined ? {} : { vmSince: previous.vmSince, vmHistory: history };
+  if (before === "running") history = history.map((span) => (span.to === null ? { ...span, to: now } : span));
+  if (after === "running") history = [...history, { from: now, to: null }];
+  history = history.filter((span) => span.to === null || span.to > now - VM_HISTORY_MS).slice(-VM_HISTORY_MAX);
+  return { vmSince: now, vmHistory: history };
+}
+
 /** The machine's row after this sync, as a statement, or null when nothing worth writing changed. */
 function machineStatement(db, row, request, { now, ip, rotation }) {
   // Free disk moves all the time; storing it would write the row on every sync.
   const { diskMiB, ...free } = request.machine.free;
-  const facts = { ...parse(row.facts_json, {}), vm: request.machine.vm, free };
+  const previous = parse(row.facts_json, {});
+  const facts = { ...previous, vm: request.machine.vm, free, ...vmTimeline(previous, request.machine.vm, now) };
   const health = { ...request.machine.health, localDrain: request.machine.drain };
   const skew = request.agentTime === null ? null : Math.round(request.agentTime - now);
   const factsJson = JSON.stringify(facts);

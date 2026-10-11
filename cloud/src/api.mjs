@@ -158,6 +158,63 @@ export async function patchTimetable({ db, request, params, identity, ip, now })
   }, { etag: `"${revision}"` });
 }
 
+/**
+ * The parts of a definition the dashboard edits on their own (§7): each
+ * handler takes only its own fields, merges them into the current
+ * definition and saves the whole through normaliseJob, so every rule a PUT
+ * checks applies here too.
+ */
+const DEFINITION_PARTS = {
+  // `{requireLabels?, preferMachines?, preferWaitSeconds?}`; a field given as null is removed.
+  placement: {
+    keys: ["requireLabels", "preferMachines", "preferWaitSeconds"],
+    apply: (current, body) => ({ placement: withoutNulls({ ...current.placement, ...body }) }),
+  },
+  // `{cpus?, memoryMiB?, diskMiB?}`.
+  resources: {
+    keys: ["cpus", "memoryMiB", "diskMiB"],
+    apply: (current, body) => ({ resources: { ...current.resources, ...withoutNulls(body) } }),
+  },
+  // `{image}`: a tag or, preferably, `repo@sha256:…` (the "promote tag → digest" button sends that).
+  image: {
+    keys: ["image"],
+    apply: (current, body) => {
+      if (typeof body.image !== "string" || !body.image.trim()) throw new HttpError(400, "image must be an image reference");
+      return { image: body.image.trim() };
+    },
+  },
+};
+
+function withoutNulls(object) {
+  return Object.fromEntries(Object.entries(object).filter(([, value]) => value !== null && value !== undefined));
+}
+
+/** PATCH /v1/jobs/:id/placement | /resources | /image. If-Match is honoured when sent. */
+export async function patchDefinition({ db, request, params, identity, ip, now }, part) {
+  const { keys, apply } = DEFINITION_PARTS[part];
+  const body = await readJson(request, { maxBytes: 8192 });
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new HttpError(400, "The body must be an object");
+  const unknown = Object.keys(body).filter((key) => !keys.includes(key));
+  if (unknown.length) throw new HttpError(400, `Unknown ${part} field ${unknown.join(", ")}`);
+  if (!Object.keys(body).length) throw new HttpError(400, "Nothing to change");
+  const current = await requireJob(db, params.id);
+  const expected = ifMatch(request);
+  if (expected !== null && expected !== "*" && expected !== current.revision) throw conflict(current.revision);
+  const next = normaliseJob({ ...definitionOf(current), ...apply(current, body) });
+  let revision = current.revision;
+  let differences = [];
+  if (jobDifferences(definitionOf(current), next).length) {
+    ({ revision, differences } = await replaceJob(db, current, next, { now, actor: identity.actor, ip, action: `job.${part}` }));
+  }
+  return json(200, {
+    ok: true,
+    job: current.id,
+    changed: differences.map((difference) => difference.field),
+    revision,
+    [part]: next[part],
+  }, { etag: `"${revision}"` });
+}
+
 export async function setPaused({ db, params, identity, ip, now }, paused) {
   await requireJob(db, params.id);
   const [update] = await db.batch([
@@ -206,12 +263,17 @@ export async function listRuns({ db, params, url }) {
   await requireJob(db, params.id);
   const limit = integerParam(url, "limit", { fallback: 50, minimum: 1, maximum: 200 });
   const before = integerParam(url, "before", { fallback: Number.MAX_SAFE_INTEGER, minimum: 0 });
-  const { results } = await db.prepare(`SELECT ${RUN_LIST_COLUMNS}, reports_json FROM runs
-    WHERE job_id = ? AND due_at < ? ORDER BY due_at DESC LIMIT ?`).bind(params.id, before, limit).all();
+  // `skipped=0` leaves out skipped slots (a paused job records one per slot), as the dashboard's history does.
+  const skipped = url.searchParams.get("skipped") !== "0";
+  const [{ results }, names] = await Promise.all([
+    db.prepare(`SELECT ${RUN_LIST_COLUMNS}, reports_json FROM runs
+      WHERE job_id = ? AND due_at < ? ${skipped ? "" : "AND state != 'skipped'"} ORDER BY due_at DESC LIMIT ?`).bind(params.id, before, limit).all(),
+    machineNames(db),
+  ]);
   return json(200, {
     job: params.id,
     keep: null,
-    runs: results.map(clientRun),
+    runs: results.map((row) => clientRun(row, names)),
     next: results.length === limit ? results.at(-1).due_at : null,
   });
 }
@@ -223,8 +285,16 @@ async function requireRun(db, id) {
   return row;
 }
 
+/** Machine names by id, revoked ones included (old runs name them). One small read. */
+export async function machineNames(db) {
+  const { results } = await db.prepare("SELECT id, name FROM machines").all();
+  return new Map(results.map((row) => [row.id, row.name]));
+}
+
 export async function getRun({ db, params }) {
-  return json(200, clientRun(await requireRun(db, params.id)));
+  const row = await requireRun(db, params.id);
+  const machine = row.machine_id ? await db.prepare("SELECT name FROM machines WHERE id = ?").bind(row.machine_id).first() : null;
+  return json(200, clientRun(row, machine ? new Map([[row.machine_id, machine.name]]) : null));
 }
 
 /** The run's stored log tail (redacted by the agent and again by hc-core), each line with a level. */
@@ -336,7 +406,10 @@ export async function audit({ db, url }) {
   });
 }
 
-const SETTING_KEYS = { globalPause: "global_pause", retention: "retention", roles: "roles" };
+const SETTING_KEYS = {
+  globalPause: "global_pause", retention: "retention", roles: "roles", desiredAgentVersion: "desired_agent_version",
+};
+const VERSION = /^\d{1,4}\.\d{1,4}\.\d{1,4}$/;
 
 function checkSettings(body) {
   const unknown = Object.keys(body).filter((key) => !(key in SETTING_KEYS));
@@ -348,6 +421,9 @@ function checkSettings(body) {
       if (!(key in DEFAULT_RETENTION)) throw new HttpError(400, `Unknown retention setting ${key}`);
       if (!Number.isInteger(value) || value < 1 || value > 3650) throw new HttpError(400, `retention.${key} must be a whole number from 1 to 3650`);
     }
+  }
+  if (body.desiredAgentVersion !== undefined && body.desiredAgentVersion !== null && !VERSION.test(String(body.desiredAgentVersion))) {
+    throw new HttpError(400, "desiredAgentVersion must be a version like 0.2.0, or null");
   }
   if (body.roles !== undefined) {
     if (!body.roles || typeof body.roles !== "object" || Array.isArray(body.roles)) throw new HttpError(400, "roles must be an object");
@@ -364,6 +440,8 @@ async function currentSettings(db) {
     globalPause: stored.global_pause === true,
     retention: { ...DEFAULT_RETENTION, ...(stored.retention ?? {}) },
     roles: stored.roles ?? {},
+    // Machines on an older agent show "needs update" (until M7's signed updates, a person updates them).
+    desiredAgentVersion: stored.desired_agent_version ?? null,
   };
 }
 
