@@ -1,6 +1,6 @@
 // The agent with a VM (§4.4), against the fake colima and docker on PATH and
 // a stand-in control plane: a claim starts the VM and the run waits for it;
-// the Mac is held awake (caffeinate) only while a run is active; the VM
+// the Mac is held awake (caffeinate) while a run is active or due soon; the VM
 // stops after the idle time; three failed starts gate the machine until a
 // probe starts it; a failed pre-warm counts; the control plane's `config` is
 // honoured unless the machine sets its own; a busy VM offers only what fits.
@@ -71,6 +71,27 @@ test("a claim starts the VM, the Mac stays awake while the run is active, and th
   assert.equal(decision.action, "stop");
   assert.equal((await colimaCalls(dir)).at(-1), `stop ${PROFILE}`);
   assert.ok(log.names().includes("vm_stop"));
+});
+
+test("the Mac is also held awake while a run is due here within 15 minutes, not for a slot another machine is preferred for", async (t) => {
+  const { agent, plane, awake } = await vmAgent(t);
+  const now = Date.now();
+  const upcoming = (entries) => plane.syncPlan.push({ body: { ...OK_SYNC(), upcoming: entries } });
+  upcoming([{ jobId: "blend", dueAt: now + 20 * 60_000, cpus: 1, memoryMiB: 512, preferred: true }]);
+  await agent.syncOnce();
+  assert.equal(agent.caffeinate.holding, false, "20 minutes ahead is too early");
+  upcoming([{ jobId: "blend", dueAt: now + 10 * 60_000, cpus: 1, memoryMiB: 512, preferred: false, preferredElsewhere: true }]);
+  await agent.syncOnce();
+  assert.equal(agent.caffeinate.holding, false, "a slot another machine is preferred for");
+  upcoming([{ jobId: "blend", dueAt: now + 10 * 60_000, cpus: 1, memoryMiB: 512, preferred: true }]);
+  await agent.syncOnce();
+  assert.equal(agent.caffeinate.holding, true);
+  assert.equal((await agent.status()).runtime.awake, true);
+  assert.equal(await until(async () => (await lines(path.join(awake, "started"))).length), 1);
+  upcoming([]);
+  await agent.syncOnce();
+  assert.equal(agent.caffeinate.holding, false, "released once nothing is due");
+  assert.equal((await until(async () => (await lines(path.join(awake, "stopped"))).length)), 1);
 });
 
 test("three failed starts make the VM unhealthy: no claims, no pre-warm; the probe starts it again and claims resume", async (t) => {

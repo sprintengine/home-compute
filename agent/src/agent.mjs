@@ -197,14 +197,29 @@ export class Agent {
   #runsChanged() {
     const active = this.activeRuns();
     this.runtime.setContext?.({ runs: active.map((run) => run.resources), busy: active.length > 0 });
-    if (active.length) this.caffeinate?.hold();
-    else {
-      this.caffeinate?.release();
+    this.#stayAwake();
+    if (!active.length) {
       if (this.runs.size === 0 || [...this.runs.values()].every((run) => run.finished)) {
         if (this.runtime.idle && !this.killed) this.#track(this.runtime.idle());
       }
     }
     this.vmWakeup?.abort();
+  }
+
+  /**
+   * Holds the Mac awake (§4.4) while a run is active and while one is due
+   * here soon: an upcoming slot this machine is not merely a fallback for,
+   * within `awakeAheadSeconds` (default 15 minutes, the control plane's
+   * look-ahead). An idle Mac that slept through its slot would leave the run
+   * waiting until someone woke it. Released when neither holds.
+   */
+  #stayAwake() {
+    if (!this.caffeinate) return;
+    const now = this.clock.now();
+    const ahead = (this.config.awakeAheadSeconds ?? 900) * 1000;
+    const dueSoon = this.upcoming.some((slot) => !slot.preferredElsewhere && typeof slot.dueAt === "number" && slot.dueAt - now <= ahead);
+    if (this.activeRuns().length || dueSoon) this.caffeinate.hold();
+    else this.caffeinate.release();
   }
 
   /** The idle and keep-warm times: the machine's own colima settings win over the control plane's `config`. */
@@ -371,6 +386,7 @@ export class Agent {
     if (response.rotateCredential?.credential) await this.#rotate(response.rotateCredential.credential);
     this.upcoming = response.upcoming ?? [];
     this.serverConfig = response.config ?? null;
+    this.#stayAwake();
     this.vmWakeup?.abort();
     if (response.claims?.length || response.cancel?.length) {
       this.log("sync", { claims: response.claims.map((entry) => entry.run.id), cancel: response.cancel, next: response.nextSyncInMs, sentAt: iso(sentAt) });
