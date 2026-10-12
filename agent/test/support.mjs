@@ -7,7 +7,8 @@ import { StateDir } from "../src/state.mjs";
 
 export async function tempState(t) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "hc-agent-test-"));
-  t?.after?.(() => rm(dir, { recursive: true, force: true }));
+  // A killed agent can still be writing a run's state as this runs (ENOTEMPTY); rm retries that.
+  t?.after?.(() => rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
   const state = new StateDir(path.join(dir, "state"));
   await state.ensure();
   return state;
