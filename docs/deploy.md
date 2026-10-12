@@ -93,7 +93,8 @@ own code locally against the deployed database (the change goes through the
 same `/v1` checks and the audit log, as `local-admin@home-compute.invalid`):
 
 ```sh
-HC_VAULT_PUBLIC_KEY=<the VAULT_PUBLIC_KEY value, only to set secrets> cloud/scripts/local-admin.sh   # http://127.0.0.1:8790
+# The public key is only needed to set secrets; on the Mac mini a copy is kept (0600) beside the agent's state.
+HC_VAULT_PUBLIC_KEY="$(cat "$HOME/Library/Application Support/home-compute/vault-public-key")" cloud/scripts/local-admin.sh   # http://127.0.0.1:8790
 export HC_ADMIN=http://127.0.0.1:8790
 HC_URL=$HC_ADMIN node src/cli.mjs cloud secrets list
 ```
