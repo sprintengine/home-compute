@@ -282,6 +282,51 @@ export function sparkSummary(durations) {
   return `${runs.length} recent run${runs.length === 1 ? "" : "s"}, median ${duration(median)}, longest ${duration(sorted.at(-1))}${failed ? `, ${failed} failed` : ""}`;
 }
 
+// ---------- Running now and next up
+
+/**
+ * Every run going now, for the top of the overview: those in progress, the
+ * longest-running first, then those waiting for a machine, the longest wait
+ * first. A wait past WAITING_TOO_LONG_MS is left to attention. Each is `{id,
+ * job, phase, since, seconds, run}` (`since` in epoch ms, `seconds` how long
+ * it has been going, `run` the activeRuns entry). The local controller has
+ * no activeRuns, so there it is read from the jobs (`run` is null).
+ */
+export function runningNow(snapshot, now = Date.now()) {
+  const rows = snapshot?.activeRuns
+    ? snapshot.activeRuns.map((run) => ({
+      id: run.id, job: run.job, phase: phaseOf(run), run,
+      since: phaseOf(run) === "due" ? parseTime(run.submittedAt) : parseTime(run.startedAt) ?? parseTime(run.claimedAt) ?? parseTime(run.submittedAt),
+    })).filter((row) => row.phase !== "due" || now - (row.since ?? now) < WAITING_TOO_LONG_MS)
+    : (snapshot?.jobs ?? []).filter((job) => ["running", "queued"].includes(jobState(job))).map((job) => {
+      const current = (job.recentRuns ?? []).find((run) => run.id === job.activeJobId);
+      const queued = jobState(job) === "queued";
+      return {
+        id: job.activeJobId ?? null, job: job.id, phase: queued ? "due" : "running", run: null,
+        since: (queued ? null : parseTime(current?.startedAt)) ?? parseTime(current?.submittedAt) ?? parseTime(job.lastSubmittedAt),
+      };
+    });
+  // Unknown start times sort last; Array#sort is stable, so ties keep the snapshot's order.
+  const waiting = (row) => (row.phase === "due" ? 1 : 0);
+  return rows
+    .map((row) => ({ ...row, seconds: row.since === null ? null : Math.max(0, (now - row.since) / 1000) }))
+    .sort((a, b) => waiting(a) - waiting(b) || (a.since ?? Infinity) - (b.since ?? Infinity) || 0);
+}
+
+/**
+ * The next runs in schedule order, soonest first: the snapshot's `upcoming`
+ * slots (hosted, each with the machine expected to take it), else each
+ * job's `nextDueAt` (the local controller). Ties keep the order they came
+ * in. A slot more than a minute past is dropped: its run is in Running now
+ * by the next refresh. Each is `{job, at, machine?, note?}`, `at` in epoch ms.
+ */
+export function nextRuns(snapshot, now = Date.now(), { count = 6 } = {}) {
+  const slots = snapshot?.upcoming
+    ? snapshot.upcoming.map((slot) => ({ ...slot, at: parseTime(slot.at) }))
+    : (snapshot?.jobs ?? []).filter((job) => job.enabled !== false).map((job) => ({ job: job.id, at: parseTime(job.nextDueAt) }));
+  return slots.filter((slot) => slot.at !== null && slot.at >= now - MINUTE).sort((a, b) => a.at - b.at).slice(0, count);
+}
+
 // ---------- Machines
 
 export const MACHINE_STATUS = {

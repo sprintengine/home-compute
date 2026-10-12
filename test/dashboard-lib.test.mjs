@@ -6,8 +6,8 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import {
-  attentionItems, bothClocks, installCommands, localScheduleText, memoryHint, parseArgs, parseLabels, parseRoute, peakMiB, phaseSteps,
-  pinnedImage, scheduleLine, scheduleText, slotsByHour, sparkBars, sparkSummary, timetableModel, vmUptime, zoneOffsetMinutes,
+  attentionItems, bothClocks, installCommands, localScheduleText, memoryHint, nextRuns, parseArgs, parseLabels, parseRoute, peakMiB, phaseSteps,
+  pinnedImage, runningNow, scheduleLine, scheduleText, slotsByHour, sparkBars, sparkSummary, timetableModel, vmUptime, zoneOffsetMinutes,
 } from "../dashboard/lib.js";
 
 const SUMMER = Date.UTC(2026, 6, 1, 12); // Irish summer time: UTC+1
@@ -94,6 +94,90 @@ test("attention: failed and lost runs, long waits with why, machines, updates an
   assert.equal(items.find((item) => item.kind === "failed").href, "#/run/r_1");
   assert.match(items.find((item) => item.kind === "blocked").detail, /ecmwf, gfs$/);
   assert.deepEqual(attentionItems({ jobs: [], machines: [] }, now), []);
+});
+
+test("running now: every run in progress, the longest-running first, then short waits; long waits are left to attention", () => {
+  const now = Date.UTC(2026, 9, 11, 12);
+  const ago = (minutes) => new Date(now - minutes * 60_000).toISOString();
+  const snapshot = {
+    activeRuns: [
+      { id: "r_wait", job: "quick", phase: "due", submittedAt: ago(2) },
+      { id: "r_pull", job: "hello", phase: "pulling", submittedAt: ago(4), claimedAt: ago(3) },
+      { id: "r_slow", job: "slow", phase: "running", submittedAt: ago(95), claimedAt: ago(94), startedAt: ago(90) },
+      { id: "r_long", job: "render", phase: "due", submittedAt: ago(14) },
+      { id: "r_a", job: "tie-a", phase: "running", startedAt: ago(10) },
+      { id: "r_b", job: "tie-b", phase: "running", startedAt: ago(10) },
+      { id: "r_c", job: "clockless", phase: "running" },
+      { id: "r_wait2", job: "older-wait", phase: "due", submittedAt: ago(5) },
+    ],
+  };
+  const rows = runningNow(snapshot, now);
+  assert.deepEqual(rows.map((row) => [row.job, row.phase, row.seconds]), [
+    ["slow", "running", 90 * 60],
+    ["tie-a", "running", 600],
+    ["tie-b", "running", 600],
+    ["hello", "pulling", 180],
+    ["clockless", "running", null],
+    ["older-wait", "due", 300],
+    ["quick", "due", 120],
+  ], "running before waiting, longest first, ties in the snapshot's order; render's 14 min wait is in attention");
+  assert.equal(rows[0].run.id, "r_slow");
+  assert.deepEqual(runningNow({ activeRuns: [], jobs: [{ id: "x", running: true, phase: "running" }] }, now), [], "hosted: activeRuns is the whole story");
+  assert.deepEqual(runningNow({ jobs: [] }, now), [], "nothing running");
+  assert.deepEqual(runningNow(null, now), []);
+
+  // The local controller: no activeRuns, so the jobs say what runs, and the run in their history when it started.
+  const local = runningNow({
+    jobs: [
+      { id: "idle", configuredEnabled: true },
+      { id: "queued", running: true, activeState: "Queued", activeJobId: "j-2", lastSubmittedAt: ago(1) },
+      { id: "harmonie", running: true, activeState: "Running", activeJobId: "j-1", lastSubmittedAt: ago(20),
+        recentRuns: [{ id: "j-1", submittedAt: ago(20), startedAt: ago(18) }, { id: "j-0", startedAt: ago(700) }] },
+      { id: "prune", running: true, activeState: "Running", activeJobId: "j-3", lastSubmittedAt: ago(3) },
+    ],
+  }, now);
+  assert.deepEqual(local.map((row) => [row.job, row.id, row.phase, row.seconds]), [
+    ["harmonie", "j-1", "running", 18 * 60],
+    ["prune", "j-3", "running", 180],
+    ["queued", "j-2", "due", 60],
+  ]);
+});
+
+test("next up: the coming runs soonest first, ties in the order they came, nothing stale", () => {
+  const now = Date.UTC(2026, 9, 11, 12);
+  const at = (minutes) => new Date(now + minutes * 60_000).toISOString();
+  const hosted = nextRuns({
+    upcoming: [
+      { job: "gfs", at: at(40), machine: null, note: "no machine has labels arch=amd64" },
+      { job: "blend", at: at(5), machine: "mac-mini" },
+      { job: "ecmwf", at: at(20), machine: "mac-mini" },
+      { job: "harmonie", at: at(20), machine: "linux-1" },
+      { job: "stale", at: at(-3) },
+      { job: "just-due", at: at(-0.5) },
+    ],
+  }, now);
+  assert.deepEqual(hosted.map((slot) => [slot.job, (slot.at - now) / 60_000, slot.machine ?? null]), [
+    ["just-due", -0.5, null], ["blend", 5, "mac-mini"], ["ecmwf", 20, "mac-mini"], ["harmonie", 20, "linux-1"], ["gfs", 40, null],
+  ]);
+  assert.equal(hosted.at(-1).note, "no machine has labels arch=amd64");
+  assert.equal(nextRuns({ upcoming: [{ job: "a", at: at(1) }, { job: "b", at: at(2) }, { job: "c", at: at(3) }] }, now, { count: 2 }).length, 2);
+
+  // The local controller: each job's nextDueAt; paused, switched-off and running jobs have none to show.
+  const local = nextRuns({
+    jobs: [
+      { id: "prune", enabled: true, nextDueAt: at(50) },
+      { id: "harmonie", enabled: true, nextDueAt: at(10) },
+      { id: "paused", enabled: false, paused: true, nextDueAt: at(1) },
+      { id: "off", enabled: false, configuredEnabled: false, nextDueAt: at(2) },
+      { id: "running", enabled: true, running: true, nextDueAt: null },
+      { id: "tie", enabled: true, nextDueAt: at(10) },
+    ],
+  }, now);
+  assert.deepEqual(local.map((slot) => [slot.job, (slot.at - now) / 60_000]), [["harmonie", 10], ["tie", 10], ["prune", 50]]);
+
+  assert.deepEqual(nextRuns({ upcoming: [] }, now), [], "no schedules (or everything paused)");
+  assert.deepEqual(nextRuns({ jobs: [{ id: "adhoc", enabled: true, schedule: null, nextDueAt: null }] }, now), []);
+  assert.deepEqual(nextRuns(null, now), []);
 });
 
 test("peak memory prefers the workload's own figure; the resources hint sums up the history", () => {
