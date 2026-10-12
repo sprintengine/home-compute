@@ -175,12 +175,18 @@ const DEFINITION_PARTS = {
     keys: ["cpus", "memoryMiB", "diskMiB"],
     apply: (current, body) => ({ resources: { ...current.resources, ...withoutNulls(body) } }),
   },
-  // `{image}`: a tag or, preferably, `repo@sha256:…` (the "promote tag → digest" button sends that).
+  // `{image?, registryAuth?}`: a tag or, preferably, `repo@sha256:…` (the "promote tag → digest" button sends that),
+  // and the vault secret that pulls it from a private registry (`"vault:<name>"`, null for none).
   image: {
-    keys: ["image"],
+    keys: ["image", "registryAuth"],
     apply: (current, body) => {
-      if (typeof body.image !== "string" || !body.image.trim()) throw new HttpError(400, "image must be an image reference");
-      return { image: body.image.trim() };
+      const next = {};
+      if (body.image !== undefined) {
+        if (typeof body.image !== "string" || !body.image.trim()) throw new HttpError(400, "image must be an image reference");
+        next.image = body.image.trim();
+      }
+      if (body.registryAuth !== undefined) next.registryAuth = body.registryAuth;
+      return next;
     },
   },
 };
@@ -380,13 +386,16 @@ export async function snapshot({ db, now }) {
  * is still current, so an idle dashboard's poll costs three indexed reads.
  */
 export async function changes({ db, url }) {
-  const [runs, versions, machines] = await db.batch([
+  const [runs, versions, machines, alerts] = await db.batch([
     db.prepare("SELECT MAX(updated_at) AS at FROM runs"),
-    db.prepare("SELECT key, value_json FROM settings WHERE key IN ('jobs_version', 'machines_version')"),
+    db.prepare("SELECT key, value_json FROM settings WHERE key IN ('jobs_version', 'machines_version', 'secrets_version')"),
     db.prepare("SELECT MAX(COALESCE(last_seen_at, enrolled_at)) AS at FROM machines"),
+    // An alert opening or resolving (not its summary's minute-by-minute age).
+    db.prepare("SELECT MAX(MAX(opened_at), COALESCE(MAX(resolved_at), 0)) AS at FROM alerts"),
   ]);
   const version = Object.fromEntries(versions.results.map((row) => [row.key, row.value_json]));
-  const cursor = [runs.results[0]?.at ?? 0, version.jobs_version ?? "0", machines.results[0]?.at ?? 0, version.machines_version ?? "0"].join(".");
+  const cursor = [runs.results[0]?.at ?? 0, version.jobs_version ?? "0", machines.results[0]?.at ?? 0, version.machines_version ?? "0",
+    version.secrets_version ?? "0", alerts.results[0]?.at ?? 0].join(".");
   if (url.searchParams.get("since") === cursor) return empty(204);
   return json(200, { cursor });
 }

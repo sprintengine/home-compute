@@ -6,6 +6,8 @@
   "main": "src/hc-web.mjs",
   "compatibility_date": "2026-10-01",
   "workers_dev": true,
+  // No per-version preview URLs: each would be one more public hostname.
+  "preview_urls": false,
   // The dashboard folder is served as it is. Requests that match no file
   // (/v1/*, and /assets/*, which the page asks for) reach the Worker.
   "assets": { "directory": "../dashboard", "binding": "ASSETS" },
@@ -14,18 +16,19 @@
       "binding": "DB",
       "database_name": "home-compute",
       // Replace with the id `wrangler d1 create home-compute` prints. Local dev ignores it.
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "4733103a-34c8-4bfe-b81b-136c0e729713",
       "migrations_dir": "migrations"
     }
   ],
   "vars": {
     // The Access team, as in https://<team>.cloudflareaccess.com, and the application's AUD tag.
     "ACCESS_TEAM_DOMAIN": "",
-    "ACCESS_AUD": "",
-    // Comma-separated emails that are admins before any `roles` setting exists.
-    "BOOTSTRAP_ADMINS": "",
-    // hc-core's URL, shown in the enrol command that comes with a join token.
-    "CORE_URL": ""
+    "ACCESS_AUD": ""
   }
-  // Secret: CSRF_KEY (wrangler secret put CSRF_KEY -c wrangler.web.jsonc). Locally: .dev.vars.
+  // Secrets (wrangler secret put NAME -c wrangler.web.jsonc; locally .dev.vars), kept out of
+  // this file because they are either secret or the owner's own:
+  //   CSRF_KEY          32+ random bytes for the dashboard's CSRF tokens.
+  //   BOOTSTRAP_ADMINS  comma-separated emails that are admins before any `roles` setting exists.
+  //   CORE_URL          hc-core's URL, shown in the enrol command that comes with a join token.
+  //   VAULT_PUBLIC_KEY  the vault's RSA-OAEP public key (SPKI, base64); hc-web can only encrypt.
 }

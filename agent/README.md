@@ -176,7 +176,8 @@ temporary file, then a rename); `doctor` checks this.
 | `pullTimeoutSeconds` | `1200` | A pull taking longer fails the run (§3.6). |
 | `docker` | `{}` | `binary` (default `docker`, found on PATH); `host`, a `unix://` socket (default `DOCKER_HOST`, else the current docker context, else `/var/run/docker.sock`); `cgroupParent`, e.g. `"home-compute.slice"` on Linux (see Services). |
 | `colima` | `{}` | `profile` (default `home-compute`; never `default`), `binary`, `home` (COLIMA_HOME), `vmType` (`vz`), `diskGiB` (60; a disk only grows), `minCpus` (2), `minMemoryMiB` (2048), `startTimeoutSeconds` (600), `mountHome` (false: the VM sees none of your files), and `idleStopSeconds`/`keepWarmSeconds`, which override the control plane's `config` when set (0 idle: never stop). |
-| `caffeinate` | `"auto"` | Hold `caffeinate -i -w <agent pid>` while a run is active: `"auto"` on a Mac with a real runtime, `true`, or `false`. |
+| `caffeinate` | `"auto"` | Hold `caffeinate -i -w <agent pid>` while a run is active or due on this machine soon: `"auto"` on a Mac with a real runtime, `true`, or `false`. |
+| `awakeAheadSeconds` | `900` | How long before a slot this machine is preferred for (or the only one for) the Mac is held awake. |
 | `fake` | `{}` | FakeRuntime's options: `script` (or `scripts` by job id or image), `vm` (`"stopped"` for a Colima-like host), `bootMs`, `pullMs`, `images`, `cpus`, `memoryMiB`, `diskFreeMiB`. |
 
 A FakeRuntime script is `{output, exitCode, oomKilled, hang, ignoreStop}`,
@@ -263,8 +264,9 @@ report. Without one, a container prints one line and exits 0.
   start works. A failed start is stopped with `colima stop --force` so it
   holds no memory.
 - **Sleep.** On a Mac, `caffeinate -i -w <agent pid>` is held while any run
-  is active and released when none is; it ends with the agent whatever
-  happens.
+  is active, or a slot this machine would take is due within
+  `awakeAheadSeconds`, and released when neither holds; it ends with the
+  agent whatever happens.
 - **Failures.** 5xx, 429, Cloudflare's 1027 or no network: exponential backoff
   with jitter, at most 5 minutes; runs carry on and results wait in the
   outbox. 401/403: revoked; it claims nothing more, finishes its runs, keeps

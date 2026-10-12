@@ -1,0 +1,80 @@
+# The dead-man check for the hosted control plane, from outside Cloudflare.
+# The control plane emails its own alerts from its cron, so it cannot say
+# that the cron (or the Worker, or D1) has stopped. Every 10 minutes this
+# asks hc-core's /health/cron (200 only while the cron ticked in the last
+# 5 minutes and D1 answers) and whether hc-web answers at all (through
+# Access a sign-in redirect counts as answering). A failure that is still
+# there a minute later opens the issue "Home Compute control plane is not
+# answering" (label `deadman`), which GitHub emails to everyone watching the
+# repository; while it stays down the issue stays open (no more email), and
+# the next good check closes it.
+#
+# Set the repository variables HC_CORE_URL and HC_WEB_URL (Settings ›
+# Secrets and variables › Actions › Variables). Without them it does nothing.
+# GitHub may delay scheduled runs by some minutes, and disables schedules in a
+# repository without commits for 60 days (re-enable it under Actions).
+name: Control plane dead-man check
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: deadman
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: vars.HC_CORE_URL != ''
+    env:
+      CORE: ${{ vars.HC_CORE_URL }}
+      WEB: ${{ vars.HC_WEB_URL }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TITLE: Home Compute control plane is not answering
+    steps:
+      - name: Ask hc-core and hc-web, twice a minute apart before calling it down
+        id: probe
+        run: |
+          probe() {
+            problems=""
+            body=$(curl -sS --max-time 20 --retry 2 --retry-all-errors -w '\n%{http_code}' "${CORE%/}/health/cron" 2>&1) || true
+            code=$(printf '%s' "$body" | tail -n1)
+            if [ "$code" != "200" ]; then problems="hc-core /health/cron answered ${code:-nothing}: $(printf '%s' "$body" | head -n1 | cut -c1-300)"; fi
+            if [ -n "$WEB" ]; then
+              web=$(curl -sS --max-time 20 --retry 2 --retry-all-errors -o /dev/null -w '%{http_code}' "${WEB%/}/v1/health" 2>&1) || true
+              case "$web" in 2??|3??|401|403) ;; *) problems="${problems:+$problems; }hc-web answered ${web:-nothing}" ;; esac
+            fi
+            printf '%s' "$problems"
+          }
+          first=$(probe)
+          if [ -n "$first" ]; then sleep 60; second=$(probe); else second=""; fi
+          echo "problem=$second" >> "$GITHUB_OUTPUT"
+          echo "first: ${first:-ok}"; echo "second: ${second:-ok}"
+      - name: Open the issue (once)
+        if: steps.probe.outputs.problem != ''
+        env:
+          PROBLEM: ${{ steps.probe.outputs.problem }}
+        run: |
+          gh label create deadman --color B60205 --description "The control plane's dead-man check" 2>/dev/null || true
+          number=$(gh issue list --label deadman --state open --json number --jq '.[0].number')
+          text="$(date -u +%FT%TZ): $PROBLEM. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          if [ -z "$number" ]; then
+            gh issue create --title "$TITLE" --label deadman --body "The dead-man check (.github/workflows/deadman.yml) could not reach the hosted control plane twice in a row, a minute apart. Scheduling may have stopped: check the Workers and their cron in the Cloudflare dashboard, and the runbook in docs/deploy.md.
+
+          $text"
+          fi
+          exit 1
+      - name: Close the issue once it answers again
+        if: steps.probe.outputs.problem == ''
+        run: |
+          for number in $(gh issue list --label deadman --state open --json number --jq '.[].number'); do
+            gh issue close "$number" --comment "$(date -u +%FT%TZ): answering again (cron ticking)."
+          done

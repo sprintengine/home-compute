@@ -2,6 +2,10 @@
 
 Status: design proposal, 2026-10-11. Supersedes the Bacalhau architecture in
 [implementation-plan.md](implementation-plan.md) once milestone M5 below ships.
+*As built (2026-10-12):* M0–M4 and M5's vault are built; both Workers are
+deployed in shadow mode (§9 phase 0) and the Mac mini's agent is enrolled
+(phase 1). Alerts were pulled forward from M8 (§13). The runbook, including
+the per-job cut-over checklist, is [deploy.md](deploy.md).
 
 Home Compute today is a Node daemon on the Mac mini that submits jobs on a UTC
 timetable to a local Bacalhau orchestrator+compute node, which runs them in
@@ -573,6 +577,9 @@ The agent uses its own profile, `home-compute`, so it never fights the owner's `
 - **Failures**: if a start fails 3 times, `health.vm = "failed"`. The server stops offering runs
   to this machine and the dashboard shows the last `colima` error.
 - **Sleep**: while a run is active the agent holds `caffeinate -i -w <pid>`.
+  *As built:* also while a slot this machine is not merely a fallback for is due within
+  `awakeAheadSeconds` (default 900, the sync's 15-minute look-ahead), so an idle Mac that could
+  sleep does not sleep through its slot.
 
 *As built (M3):* the start command is `colima start <profile> --runtime docker --vm-type vz
 --cpus C --memory M --disk D --activate=false --ssh-config=false --mount none` (Colima 0.10
@@ -734,6 +741,27 @@ email or service-token `common_name` in `settings`.
   and redacted from logs and reports twice (agent, then Worker).
 - Least privilege: the Wingfoil R2 token is an R2 API token with **Object Read & Write on that one bucket**.
 - `local:` secrets let a cautious user keep a credential only on the machine that uses it.
+- *As built (M5):* `src/core/vault.mjs`. RSA-OAEP-3072 with SHA-256 wraps a fresh AES-256-GCM key
+  per value; the GCM additional data is `home-compute-vault\n<name>\n<key id>`, so an envelope copied
+  to another name, or opened with another key, fails. The key id is `v1-` and 12 hex digits of
+  SHA-256 over the public key's SPKI; hc-core refuses an envelope sealed under another id before
+  decrypting. The public key is hc-web's secret `VAULT_PUBLIC_KEY` (not a setting, so a database
+  write cannot swap it); the private key is hc-core's `VAULT_PRIVATE_KEY`. `/v1/secrets` (admin):
+  `GET` lists names, key ids, hints, allowed labels, the jobs that use each and the names jobs need
+  that are not set; `PUT /v1/secrets/:name {value, allowedLabels?}` seals in the Worker; `DELETE`.
+  No answer carries a value or an envelope (a workerd test requests every `GET` route after a
+  secret was set, claimed and run, and searches each body for the value in five encodings). Hints
+  are the last four characters of identifiers only (`…-id`, `…-user`) of 16+ characters. hc-core
+  keeps names and labels in isolate memory by `settings.secrets_version`, reads envelopes only for
+  the claims it has just won, and keeps each envelope's unwrapped data key as a non-extractable
+  `CryptoKey` (at most 64), so only an isolate's first claim of a secret pays the RSA operation
+  (about 1–2.5 ms). A claim whose secret is gone, refused by labels or does not open fails at once
+  with `vault: <name> <why>`; it never runs without it. A job blocked on an unset secret, or whose
+  secrets no machine's labels allow, says so in the snapshot. The CLI: `cloud secrets list | put NAME
+  (stdin) | put-env FILE --preset | delete`, and `cloud import --env-file --upload-secrets`; values
+  are never in argv or printed. A private registry's credential is a secret holding
+  `{server, username, password}` JSON, named by the job's new `registryAuth: "vault:<name>"`
+  (migration `0006`), delivered as `spec.registryAuth` (§4.5).
 
 **What a stolen agent credential can do:** claim runs that machine is eligible for, and so receive
 those jobs' secrets; send false results for them; see their specs. It **cannot** read or edit jobs,
@@ -957,6 +985,18 @@ happen between a job's slots.
 Double runs during a mistaken overlap are harmless (`readsPublishedRun`) but wasteful. The
 per-job switch avoids them, except for `prune`, which phase 4 isolates.
 
+*As built (2026-10-12):* phase 0 began at 15:49 UTC: D1 in `weur`, both Workers on
+`workers.dev`, all 21 Wingfoil jobs imported paused **and** under the global pause (so lifting the
+global pause before the cut-over still runs nothing, and each job is then resumed alone). The
+comparison is `cloud/scripts/shadow-compare.mjs`, run twice an hour by a LaunchAgent: it keeps a
+ledger of the controller's submissions (its history files keep only 50 runs; `controller.log` had
+no timestamps, which it now has) and compares them slot by slot with the hosted rows. Phase 1:
+the Mac mini's agent is enrolled with labels `site=home` and caps 2 CPU / 3 GiB, ran `hello`
+(Alpine) and one manual `wind-obs` into `staging/` with the vault's R2 secrets
+(`wingfoil-forecast:local`, published, 11 s, peak 82 MB). Robustness tests are in
+[deploy.md](deploy.md) §6. Bacalhau's `default` profile is 2 CPU / 3 GiB already, not the 6 GiB
+this document assumed, so phase 3's shrink is not needed.
+
 ---
 
 ## 10. Menu bar app and Studio module
@@ -995,9 +1035,11 @@ assistance, in focused days.
 | M3 | **Docker + Colima runtime** | `DockerCliRuntime`, `ColimaRuntime` (pre-warm, size, idle stop), stats, OOM/timeout, redaction, policy (`allowImages`) | CI (ubuntu-latest has Docker): a fixture image that prints json-lines, echoes a secret (must be `<redacted>` server-side), allocates 300 MB (peak ≥ 300 MB), OOMs at `--memory 64m`, sleeps past `runSeconds`. Colima: unit tests against a fake `colima` binary (the `macos/dev/fake-setup.sh` pattern) for start/resize/stop decisions; a manual acceptance script on the Mac mini (GitHub's macOS runners cannot run nested VMs). *Built: fake `docker`/`colima`/`caffeinate` binaries on PATH (`agent/test/fake-bin/`) with a fake Engine on a unix socket; `agent/test/docker-real.test.mjs` and `cloud/test-node/docker-integration.test.mjs` on real Docker (CI requires them; on a Mac they run in a throwaway profile via `agent/scripts/with-test-colima.sh`); `agent/scripts/acceptance-colima.sh`.* | 6 d |
 | M4 | **Hosted dashboard** | Port `feature/dashboard` app to `hc-web` assets; Access sign-in; Machines, Timetable grid, run detail with phases/stats; `/v1/changes` polling | Existing `test/dashboard.test.mjs` approach against the Worker; Playwright smoke at a 390×844 viewport (overview, run now, timetable edit) *Built: `test/dashboard-lib.test.mjs` (the page logic in Node), `cloud/test/dashboard-api.test.mjs` (workerd), and `cloud/test-node/dashboard-browser.test.mjs`: Chromium through `playwright-core` at 390×844 and 1440×900 against both Workers under `wrangler dev`, seeded with Wingfoil's timetable, a FakeRuntime agent and runs in several states; `cloud/scripts/dashboard-screenshots.mjs` shoots every page.* | 4 d |
 | M5 | **Secrets + Wingfoil cut-over** | Vault (RSA-OAEP envelope, split keys), Wingfoil preset, `import-history`, migration phases 1–4 | Worker tests: no `/v1` response contains a secret value (grep every endpoint's body); claims to non-matching labels get no secrets. Migration checklist per job | 3 d + 1–2 wk soak |
+| | | *Built (2026-10-12): the vault (§5 as built), registry credentials, the dashboard's Secrets page, phase 0 (deployed, shadow) and phase 1 (agent enrolled, `hello` and a staging Wingfoil run). Tests: `test/core-vault.test.mjs`, `cloud/test/vault.test.mjs`. Not yet: `import-history`, phases 2–4 (the checklist is [deploy.md](deploy.md) §8).* | | |
 | M6 | **Provisioning (Linux, then macOS)** | Provisioner capability, `install.sh`, task UI, uninstall | `shellcheck`; `install.sh --dry-run` with stubbed `apt`/`systemctl`/`brew` asserting step order and second-run `skip`; real run against a tailnet Linux VM and a spare Mac (checklist) | 5 d |
 | M7 | **Self-update, clients, Bacalhau removal** | Signed releases (ed25519), launcher rollback, menu bar app retarget, Studio retarget, phase 6 decommission | Update test: signed v+1 applies only when idle; bad signature refused; crash-looping update rolls back. `swift test` for the app with the fake controller updated to the hosted shape | 4 d |
 | M8 | **Later** | Windows/WSL2, Web Push or email on failure, full logs to R2, push via a hibernating Durable Object, a Cloudflare Containers "burst machine" | | — |
+| | | *Email alerts and a dead-man check were pulled forward (§13).* | | |
 
 Total for M0–M7 is about **34 working days** plus the soak. CI runs `npm run check` (core + agent +
 Studio), `npm run test --workspace cloud` (workerd), and the Docker integration job.
@@ -1090,6 +1132,44 @@ Backups: D1 Time Travel (7 d) plus a weekly Home Compute job that runs `wrangler
   enables the WAF rate-limit rule in risk 1; `workers.dev` works with the two-Worker split.
 - Should the hourly Wingfoil slots be clustered (e.g. `wind-obs` at :20) to get one VM window per hour?
 - What should notifications on failure use: Web Push, email, or the menu bar app only?
+  *Answered (2026-10-12): email through Email Routing, plus a GitHub issue from the dead-man
+  check (§13).*
 - Should a Cloudflare Containers "burst machine" (paid plan, reusing `deploy/cloudflare`) pick up
   `due` runs when no home machine is online for more than N minutes? The design allows it as just
   another claimant; it is out of scope for the free-tier build.
+
+---
+
+## 13. Alerts (pulled forward from M8)
+
+*As built (2026-10-12).* The owner hears about these without opening anything:
+
+| Kind | Opens when | Resolves when |
+| --- | --- | --- |
+| `job-failing` | a job's last two runs failed (`schedule_state.fail_streak`, kept where runs settle: completion, the timeout backstop, a claim refused a secret) | a run succeeds |
+| `stale` | a tracked output's newest `run` is older than its `maxAgeHours` and the job's first slot after that point, plus an hour, has passed | a newer run is published |
+| `no-machine` | machines are enrolled and none synced for 10 minutes | a sync |
+| `waiting` | a run due more than 15 minutes ago is unclaimed (scheduled runs held by a pause do not count) | it is claimed |
+
+- **Freshness.** A job's `report.freshness` is `{"<trackBy value>": {maxAgeHours, url?}}`. The
+  Wingfoil preset fills it per model from `registry.py`'s `maxAgeHours` and the model's pointer on
+  the data domain. The age is the newer of the job's own `published` and the pointer's `run`, which
+  hc-core reads every 15 minutes (13 small fetches; a failed read keeps the last good value), so the
+  alert covers jobs still on the old controller. Waiting for the next slot keeps a model like GFS,
+  whose newest run is 10–16 hours old in normal operation against a 12-hour limit, from alerting
+  twice a day; it alerts if a slot that should have refreshed it did not.
+- **Delivery.** `alerts` rows (migration `0005`), one open row per key. hc-core's cron (last in
+  its minute, so a failure there never stops scheduling) opens, updates and resolves them, and
+  sends one plain-text email per change through the `send_email` binding `ALERT_EMAIL` to
+  `ALERT_EMAIL_TO` (a verified Email Routing destination), at most one per 5 minutes, a reminder
+  daily while open; a failed send is retried after 10 minutes and shown on the dashboard. Every
+  write is one statement per kind of change (D1's 50 queries per invocation).
+- **The dashboard** shows open alerts, a stopped cron and failing email at the top of every page;
+  Settings has an Alerts card with *Send a test alert* (`POST /v1/alerts/test`, admin), which the
+  next cron minute emails and then resolves quietly. `GET /v1/alerts` (viewer) lists open alerts,
+  the last week's resolved ones, the cron's last tick and email status; the snapshot carries the
+  same as `alerts` and `controller.cron`.
+- **The cron itself** writes `settings.cron_last_tick` every minute. `GET /health` on hc-core is
+  liveness (200); `GET /health/cron` is 503 once the tick is 5 minutes old or D1 does not answer.
+  `.github/workflows/deadman.yml` asks it every 10 minutes from outside Cloudflare and opens a
+  GitHub issue (label `deadman`) when it fails twice a minute apart, closing it when it recovers.

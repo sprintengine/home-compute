@@ -5,6 +5,7 @@
 import {
   OFFLINE_MS, SYNC_BUSY_MS, SYNC_IDLE_MS, SYNC_MIN_MS, SYNC_SLOT_MARGIN_MS,
 } from "./protocol.mjs";
+import { vaultNames } from "./vault.mjs";
 
 const DEFAULT_PREFER_WAIT_SECONDS = 300;
 
@@ -71,15 +72,26 @@ export function machineAvailable(machine, now) {
   return unhealthyReason(machine.health) === null;
 }
 
+const vaultNamesOf = vaultNames;
+
 /**
- * Why no machine may claim a job's runs at all, whatever its placement: in
- * M2, `vault:` secrets, which hc-core cannot decrypt until the vault ships
- * (M5). A run is never started without a secret it names.
+ * Why no machine may claim a job's runs at all, whatever its placement: a
+ * `vault:` secret it names that the vault does not hold (§5). `secrets` maps
+ * the vault's secret names to `{allowedLabels}` (the `secrets` table, without
+ * values). A run is never started without a secret it names.
  */
-export function claimBlockers(job) {
-  const vault = Object.entries(job?.secretEnv ?? {})
-    .filter(([, reference]) => reference.startsWith("vault:")).map(([, reference]) => reference.slice(6));
-  return vault.length ? [`needs vault secrets, which arrive in M5: ${[...new Set(vault)].join(", ")}`] : [];
+export function claimBlockers(job, secrets = new Map()) {
+  const missing = vaultNamesOf(job).filter((name) => !secrets.has(name));
+  return missing.length ? [`needs vault secrets that are not set: ${missing.join(", ")}`] : [];
+}
+
+/**
+ * The job's vault secrets this machine may not receive: a secret goes only to
+ * machines whose labels match its `allowedLabels` (§5), so a job needing one
+ * is not claimed by any other machine.
+ */
+export function secretsRefused(job, machine, secrets = new Map()) {
+  return vaultNamesOf(job).filter((name) => secrets.has(name) && !labelsMatch(secrets.get(name).allowedLabels, machine?.labels));
 }
 
 /** When a due run's preferred machines stop having it to themselves (§3.5). */

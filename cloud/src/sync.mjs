@@ -7,17 +7,20 @@
 
 import { classifyLines } from "../../src/core/logs.mjs";
 import {
-  claimBlockers, effectiveFree, fits, labelsMatch, nextSyncDelay, placementRefusal, preferredUntil, subtract, unhealthyReason,
+  claimBlockers, effectiveFree, fits, labelsMatch, nextSyncDelay, placementRefusal, preferredUntil, secretsRefused, subtract,
+  unhealthyReason,
 } from "../../src/core/placement.mjs";
 import {
   CLAIM_SCAN, LAST_SEEN_WRITE_MS, LEASE_MS, LEASE_RENEW_AFTER_MS, newCredential, sha256Hex, UPCOMING_MS,
 } from "../../src/core/protocol.mjs";
 import { createRedactor } from "../../src/core/redact.mjs";
 import { ACTIVE_STATES, transition } from "../../src/core/run.mjs";
-import { materialiseAll } from "./cron.mjs";
+import { failedRunsStateSql, materialiseAll } from "./cron.mjs";
 import { ACTIVE_SQL, auditStatement, machineFromRow } from "./db.mjs";
 import { jobsAt } from "./jobcache.mjs";
 import { rotationDue } from "./machines.mjs";
+import { openSecretsFor, secretsAt } from "./secrets.mjs";
+import { parseRegistryAuth, vaultNames } from "../../src/core/vault.mjs";
 
 const ACTIVE = new Set(ACTIVE_STATES);
 const PHASE_COLUMNS = { "starting-vm": "vm_started_at", pulling: "pull_started_at", running: "started_at", reporting: "reporting_at" };
@@ -88,12 +91,19 @@ function progressStatement(db, row, report, now) {
     WHERE id = ? AND machine_id = ? AND state = ?`).bind(...columns.map((column) => set[column]), row.id, row.machine_id, row.state);
 }
 
-/** What the claim answer tells the agent to run (§4.2). Secret values: none until the vault (M5); `local:` names it resolves itself. */
-export function claimOf(run, job, leaseExpiresAt) {
+/**
+ * What the claim answer tells the agent to run (§4.2): `secretEnv` holds the
+ * opened `vault:` values (`values`, by secret name), only ever in this
+ * answer; `local:` names the agent resolves from its own env file.
+ */
+export function claimOf(run, job, leaseExpiresAt, values = {}) {
   const extra = parse(run.parameters_json, []) ?? [];
   const localEnv = Object.entries(job.secretEnv ?? {})
     .filter(([, reference]) => reference.startsWith("local:"))
     .map(([name, reference]) => ({ name, from: reference.slice(6) }));
+  const secretEnv = Object.fromEntries(Object.entries(job.secretEnv ?? {})
+    .filter(([, reference]) => reference.startsWith("vault:") && typeof values[reference.slice(6)] === "string")
+    .map(([name, reference]) => [name, values[reference.slice(6)]]));
   return {
     run: { id: run.id, jobId: run.job_id, attempt: run.attempt, source: run.source, dueAt: run.due_at, leaseExpiresAt },
     spec: {
@@ -101,12 +111,13 @@ export function claimOf(run, job, leaseExpiresAt) {
       entrypoint: job.entrypoint,
       args: [...job.args, ...extra],
       env: job.env,
-      secretEnv: {},
+      secretEnv,
       localEnv,
       resources: job.resources,
       runSeconds: job.timeouts.runSeconds,
       network: job.network,
       report: job.report,
+      ...(job.registryAuth && values[job.registryAuth.slice(6)] ? { registryAuth: parseRegistryAuth(values[job.registryAuth.slice(6)]) } : {}),
     },
   };
 }
@@ -117,14 +128,14 @@ export function claimOf(run, job, leaseExpiresAt) {
  * everything is paused), by priority then age, while they fit what is free.
  * Also returns when a preference window that held a run back ends.
  */
-export function chooseClaims({ due, jobs, machine, machines, free, globalPause, now }) {
+export function chooseClaims({ due, jobs, machine, machines, free, globalPause, now, secrets = new Map() }) {
   const options = [];
   const events = [];
   for (const run of due) {
     const job = jobs.get(run.job_id);
     if (!job) continue;
     if (run.source !== "manual" && (!job.enabled || job.paused || globalPause)) continue;
-    if (claimBlockers(job).length) continue;
+    if (claimBlockers(job, secrets).length || secretsRefused(job, machine, secrets).length) continue;
     const refusal = placementRefusal(job, { preferredUntil: run.preferred_until }, machine, { machines, now });
     if (refusal === "preferred") events.push(run.preferred_until);
     if (refusal) continue;
@@ -145,11 +156,12 @@ export function chooseClaims({ due, jobs, machine, machines, free, globalPause, 
  * The jobs whose runs this machine could take, whatever its free capacity:
  * `any` for every run, `manual` for manual runs only (which ignore pauses).
  */
-function possibleJobs(jobs, machine, globalPause) {
+function possibleJobs(jobs, machine, globalPause, secrets) {
   const any = [];
   const manual = [];
   for (const job of jobs.values()) {
-    if (claimBlockers(job).length || !labelsMatch(job.placement?.requireLabels, machine.labels)) continue;
+    if (claimBlockers(job, secrets).length || secretsRefused(job, machine, secrets).length) continue;
+    if (!labelsMatch(job.placement?.requireLabels, machine.labels)) continue;
     manual.push(job.id);
     if (job.enabled && !job.paused && !globalPause) any.push(job.id);
   }
@@ -197,10 +209,46 @@ function machineStatement(db, row, request, { now, ip, rotation }) {
       rotation?.hash ?? null, row.id);
 }
 
-export async function sync(db, request, { machine: row, rotated, now, ip }) {
+/**
+ * The claims' answers, each with the vault secrets its job names, opened for
+ * this machine (§5). A claimed run whose secret cannot be given (deleted
+ * since the claim was decided, not for these labels, or not opening) is
+ * failed at once with the reason, never started without it.
+ */
+async function withSecrets(db, env, machine, claimed, now) {
+  const names = [...new Set(claimed.flatMap(({ job }) => vaultNames(job)))];
+  if (!names.length) return claimed.map(({ run, job, lease }) => claimOf(run, job, lease));
+  const { values, refused } = await openSecretsFor(db, env, names, machine.labels);
+  const why = new Map(refused.map((entry) => [entry.name, entry.reason]));
+  // A registry credential that is not {server, username, password} JSON is refused like a missing one.
+  for (const { job } of claimed) {
+    const name = job.registryAuth?.slice(6);
+    if (name && name in values && !parseRegistryAuth(values[name])) why.set(name, "is not a registry credential ({server, username, password} JSON)");
+  }
+  const claims = [];
+  const failures = [];
+  for (const { run, job, lease } of claimed) {
+    const missing = vaultNames(job).filter((name) => why.has(name));
+    if (!missing.length) {
+      claims.push(claimOf(run, job, lease, values));
+      continue;
+    }
+    const error = `vault: ${missing.map((name) => `${name} ${why.get(name)}`).join("; ")}`;
+    console.error(JSON.stringify({ event: "claim_secret_refused", run: run.id, job: run.job_id, machine: machine.id, error }));
+    failures.push(db.prepare(`UPDATE runs SET state = 'failed', outcome = 'failed', error = ?1, finished_at = ?2, lease_expires_at = NULL,
+        updated_at = ?2 WHERE id = ?3 AND state = 'claimed' AND machine_id = ?4`).bind(error, now, run.id, machine.id));
+  }
+  if (failures.length) {
+    const failed = claimed.filter(({ run, job }) => vaultNames(job).some((name) => why.has(name))).map(({ run }) => ({ run: run.id, job: run.job_id }));
+    await db.batch([...failures, db.prepare(failedRunsStateSql()).bind(now, JSON.stringify(failed))]);
+  }
+  return claims;
+}
+
+export async function sync(db, request, { machine: row, rotated, now, ip, env = {} }) {
   const reportedIds = request.runs.map((run) => run.id);
   const [settingRows, runRows, scheduleRows, dueRows, machineRows] = (await db.batch([
-    db.prepare("SELECT key, value_json FROM settings WHERE key IN ('jobs_version', 'global_pause')"),
+    db.prepare("SELECT key, value_json FROM settings WHERE key IN ('jobs_version', 'global_pause', 'secrets_version')"),
     db.prepare(`SELECT ${RUN_COLUMNS} FROM runs WHERE id IN (SELECT value FROM json_each(?1))
       UNION SELECT ${RUN_COLUMNS} FROM runs WHERE machine_id = ?2 AND state IN (${ACTIVE_SQL})`).bind(JSON.stringify(reportedIds), row.id),
     db.prepare("SELECT job_id, next_due_at FROM schedule_state WHERE next_due_at IS NOT NULL AND next_due_at <= ?").bind(now + UPCOMING_MS),
@@ -210,6 +258,7 @@ export async function sync(db, request, { machine: row, rotated, now, ip }) {
   const settings = Object.fromEntries(settingRows.map((setting) => [setting.key, parse(setting.value_json, null)]));
   const globalPause = settings.global_pause === true;
   const jobs = await jobsAt(db, String(settings.jobs_version ?? 0));
+  const secrets = await secretsAt(db, String(settings.secrets_version ?? 0));
   const machine = machineFromRow(row);
   const machines = machineRows.map(machineFromRow);
 
@@ -260,15 +309,15 @@ export async function sync(db, request, { machine: row, rotated, now, ip }) {
       const materialised = await materialiseAll(db, now, { jobIds: dueJobs });
       if (materialised.created) due = (await dueRunsQuery(db, now).all()).results;
     }
-    let choice = chooseClaims({ due, jobs, machine, machines, free, globalPause, now });
+    let choice = chooseClaims({ due, jobs, machine, machines, free, globalPause, now, secrets });
     if (!choice.chosen.length && due.length === CLAIM_SCAN) {
       // The oldest 20 were all for others (blocked, paused, wrong labels): look again among the jobs this machine could take.
-      const possible = possibleJobs(jobs, machine, globalPause);
+      const possible = possibleJobs(jobs, machine, globalPause, secrets);
       due = (await db.prepare(`SELECT ${RUN_COLUMNS} FROM runs r WHERE r.state = 'due' AND r.due_at <= ?1
           AND (r.job_id IN (SELECT value FROM json_each(?2)) OR (r.source = 'manual' AND r.job_id IN (SELECT value FROM json_each(?3))))
           AND NOT EXISTS (SELECT 1 FROM runs a WHERE a.job_id = r.job_id AND a.state IN (${ACTIVE_SQL}))
         ORDER BY r.due_at LIMIT ${CLAIM_SCAN}`).bind(now, JSON.stringify(possible.any), JSON.stringify(possible.manual)).all()).results;
-      choice = chooseClaims({ due, jobs, machine, machines, free, globalPause, now });
+      choice = chooseClaims({ due, jobs, machine, machines, free, globalPause, now, secrets });
     }
     claimable = choice.chosen;
     events.push(...choice.events);
@@ -298,17 +347,18 @@ export async function sync(db, request, { machine: row, rotated, now, ip }) {
 
   const results = writes.length ? await db.batch(writes) : [];
   const won = claimable.filter((_, index) => results[claimIndex[index]].meta.changes === 1);
-  const claims = [
-    ...resend.map((run) => claimOf(run, jobs.get(run.job_id), Math.max(run.lease_expires_at ?? 0, leaseExpiresAt))),
-    ...won.map(({ run, job }) => claimOf(run, job, leaseExpiresAt)),
-  ];
+  const claims = await withSecrets(db, env, machine, [
+    ...resend.map((run) => ({ run, job: jobs.get(run.job_id), lease: Math.max(run.lease_expires_at ?? 0, leaseExpiresAt) })),
+    ...won.map(({ run, job }) => ({ run, job, lease: leaseExpiresAt })),
+  ], now);
 
   // 5. What is coming for this machine, and when to sync next.
   const upcoming = [];
   for (const state of scheduleRows) {
     if (state.next_due_at <= now) continue;
     const job = jobs.get(state.job_id);
-    if (!job || !job.enabled || job.paused || globalPause || claimBlockers(job).length) continue;
+    if (!job || !job.enabled || job.paused || globalPause || claimBlockers(job, secrets).length) continue;
+    if (secretsRefused(job, machine, secrets).length) continue;
     if (!labelsMatch(job.placement?.requireLabels, machine.labels)) continue;
     const preferred = (job.placement?.preferMachines ?? []).includes(machine.name);
     const others = job.placement?.preferMachines?.length && !preferred;

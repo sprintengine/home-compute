@@ -44,7 +44,7 @@ export async function handleAgent(request, env, url, now) {
   if (pathname === "/agent/v1/sync") {
     const body = await readJson(request, { maxBytes: MAX_SYNC_BYTES });
     checkProtocol(body);
-    return json(200, await sync(env.DB, parseSync(body), { machine, rotated, now, ip }), headers);
+    return json(200, await sync(env.DB, parseSync(body), { machine, rotated, now, ip, env }), headers);
   }
   const body = await readJson(request, { maxBytes: MAX_COMPLETE_BYTES });
   checkProtocol(body);

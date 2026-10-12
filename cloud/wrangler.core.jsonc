@@ -7,14 +7,24 @@
   "main": "src/hc-core.mjs",
   "compatibility_date": "2026-10-01",
   "workers_dev": true,
+  // No per-version preview URLs: each would be one more public hostname.
+  "preview_urls": false,
   // One of the account's five cron triggers. Changes take up to 15 minutes to propagate.
   "triggers": { "crons": ["* * * * *"] },
+  // Alert emails (src/alerts.mjs) through Email Routing: only to verified destination addresses,
+  // from an address on a zone with Email Routing on. The addresses are secrets (below).
+  "send_email": [{ "name": "ALERT_EMAIL" }],
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "home-compute",
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "4733103a-34c8-4bfe-b81b-136c0e729713",
       "migrations_dir": "migrations"
     }
   ]
+  // Secrets (wrangler secret put NAME -c wrangler.core.jsonc), kept out of this file:
+  //   VAULT_PRIVATE_KEY  the vault's RSA-OAEP private key (PKCS #8, base64); only hc-core can open secrets.
+  //   ALERT_EMAIL_TO     the verified Email Routing destination alerts go to (the owner).
+  //   ALERT_EMAIL_FROM   the sender, on a zone with Email Routing enabled.
+  //   DASHBOARD_URL      hc-web's URL, linked from alert emails.
 }

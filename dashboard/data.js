@@ -189,3 +189,15 @@ export async function refreshPage(route) {
   }
   await Promise.all(tasks);
 }
+
+/** The vault's names, hints and labels (GET /v1/secrets). Values never come back from the API. */
+export function loadSecrets() {
+  return once("secrets", async () => {
+    try {
+      state.secrets = { data: (await api("/v1/secrets")).data };
+    } catch (error) {
+      state.secrets = { error: error.message, status: error.status };
+    }
+    render();
+  });
+}

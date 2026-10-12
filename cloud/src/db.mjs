@@ -13,7 +13,7 @@ export const MINUTE = 60_000;
 const JSON_FIELDS = {
   entrypoint: "entrypoint_json", args: "args_json", env: "env_json", secretEnv: "secret_env_json",
   resources: "resources_json", timeouts: "timeouts_json", schedule: "schedule_json", placement: "placement_json",
-  policy: "policy_json", report: "report_json", labels: "labels_json",
+  policy: "policy_json", report: "report_json", labels: "labels_json", registryAuth: "registry_auth_json",
 };
 export const JOB_COLUMNS = [
   "id", "description", "enabled", "paused", "image", ...Object.values(JSON_FIELDS), "network", "preset",

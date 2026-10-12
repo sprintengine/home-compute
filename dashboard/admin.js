@@ -1,12 +1,13 @@
 // Settings (global pause, retention, the agent version machines should run,
-// roles) and the audit log (§7.7). Secrets are M5: their page appears once
-// the API has them (`secrets` in the snapshot's features).
+// roles, alert email), the audit log and the vault's secrets (§7.7). The
+// secrets page is write-only: it lists names, hints and labels, and a value
+// typed into it goes to hc-web to be sealed and is never shown again.
 
-import { relative } from "./lib.js";
+import { parseLabels, relative } from "./lib.js";
 import {
-  api, banner, busy, can, emptyState, facts, fullTime, h, hasFeature, hosted, isBusy, loadMore, render, section, state, toast, when,
+  api, back, banner, busy, can, emptyState, facts, fullTime, h, hasFeature, hosted, isBusy, loadMore, render, section, state, toast, when,
 } from "./ui.js";
-import { loadAudit, loadSettings, loadSnapshot } from "./data.js";
+import { loadAudit, loadSecrets, loadSettings, loadSnapshot } from "./data.js";
 
 const RETENTION = [
   ["runDays", "Keep runs (days)"],
@@ -39,6 +40,7 @@ export function settingsPage() {
           }
         }),
       }, paused ? "Resume everything" : "Pause everything")) : null),
+    hosted() && hasFeature("alerts") ? alertsCard() : null,
     hosted() && can("admin") ? adminSettings() : null,
     h("section", { class: "card", "aria-labelledby": "me-title" },
       h("h2", { class: "card-title", id: "me-title" }, "You"),
@@ -124,6 +126,127 @@ function adminSettings() {
       h("button", { type: "button", class: "small-button", onclick: () => { draft.roles.push({ login: "", role: "viewer" }); render(); } }, "Add a login")),
     h("div", { class: "actions" },
       h("button", { class: "primary", type: "submit", disabled: isBusy("settings") }, "Save"),
+      h("button", { type: "button", onclick: () => { state.editing = null; render(); } }, "Cancel")));
+}
+
+// ---------- Alerts
+
+function alertsCard() {
+  const alerts = state.snapshot.alerts ?? {};
+  const email = alerts.email ?? {};
+  const cron = state.snapshot.controller?.cron;
+  const resolved = alerts.resolved ?? [];
+  return h("section", { class: "card", "aria-labelledby": "al-title" },
+    h("h2", { class: "card-title", id: "al-title" }, "Alerts"),
+    h("p", { class: "small" }, "You are emailed when a job fails twice in a row, a tracked output goes stale, no machine is online for 10 minutes or a run waits 15 minutes; again when it ends; and once a day while it lasts. A check outside Cloudflare opens a GitHub issue if the control plane stops answering or its cron stops."),
+    facts([
+      ["Email", email.ok === null || email.ok === undefined ? "nothing sent yet" : email.ok ? "working" : `failing: ${email.error ?? "unknown error"}`],
+      ["Last email", email.lastSentAt ? `${when(email.lastSentAt)} (${relative(email.lastSentAt)})` : null],
+      ["Cron", cron ? (cron.stale ? `not ticking (last ${cron.lastTickAt ? relative(cron.lastTickAt) : "never"})` : `ticking (last ${relative(cron.lastTickAt)})`) : null],
+      ["Open now", String((alerts.open ?? []).length)],
+    ]),
+    resolved.length ? h("details", {}, h("summary", {}, `Resolved in the last day (${resolved.length})`),
+      h("ul", { class: "list" }, resolved.map((alert) => h("li", {}, `${alert.summary} · ${relative(alert.openedAt)} to ${relative(alert.resolvedAt)}`)))) : null,
+    can("admin") ? h("div", { class: "actions" }, h("button", {
+      id: "alert-test", disabled: isBusy("alert-test"),
+      onclick: () => busy("alert-test", async () => {
+        try {
+          await api("/v1/alerts/test", { method: "POST" });
+          toast("Test alert queued: the email goes within a minute");
+          await loadSnapshot();
+        } catch (error) {
+          toast(error.message, { error: true });
+        }
+      }),
+    }, "Send a test alert")) : null);
+}
+
+// ---------- Secrets
+
+export function secretsPage() {
+  if (!hosted()) return h("div", { class: "page" }, h("h1", {}, "Secrets"), banner("Secrets are part of the hosted control plane.", "info"));
+  if (!can("admin")) return h("div", { class: "page" }, h("h1", {}, "Secrets"), banner("Only an admin can see or set secrets."));
+  if (!state.secrets) loadSecrets();
+  const loaded = state.secrets;
+  const data = loaded?.data;
+  const draft = state.editing?.kind === "secret" ? state.editing : null;
+  const start = (name = "") => {
+    state.editing = { kind: "secret", name, labels: "" };
+    render();
+  };
+  return h("div", { class: "page secrets-page" },
+    back("#/settings", "Settings"),
+    h("h1", {}, "Secrets"),
+    h("p", { class: "muted small" }, "Values are sealed by the control plane with the vault's public key as soon as they arrive, and are only ever opened for a run on a machine whose labels the secret allows. Nothing here, or anywhere in the API, shows a value again."),
+    loaded?.error ? banner(`Could not load the secrets: ${loaded.error}`) : null,
+    data && !data.vault?.configured ? banner(`The vault is not configured: ${data.vault?.error ?? "hc-web has no VAULT_PUBLIC_KEY"}`) : null,
+    !data ? h("p", { class: "muted" }, "Loading…") : h("div", { class: "table-wrap" }, h("table", { class: "secrets" },
+      h("thead", {}, h("tr", {}, h("th", { scope: "col" }, "Name"), h("th", { scope: "col" }, "Hint"), h("th", { scope: "col" }, "Machines"), h("th", { scope: "col" }, "Used by"), h("th", { scope: "col" }, "Set"), h("th", { scope: "col" }, ""))),
+      h("tbody", {},
+        data.missing.map((secret) => h("tr", { class: "attention" },
+          h("td", { class: "mono" }, secret.name), h("td", {}, h("span", { class: "chip critical" }, "not set")), h("td", {}, ""),
+          h("td", { class: "used" }, secret.usedBy.join(", ")), h("td", {}, ""),
+          h("td", {}, h("button", { class: "small-button", onclick: () => start(secret.name) }, "Set")))),
+        data.secrets.map((secret) => h("tr", {},
+          h("td", { class: "mono" }, secret.name),
+          h("td", { class: "mono" }, secret.hint ?? "—"),
+          h("td", { class: "labels" }, Object.keys(secret.allowedLabels).length ? Object.entries(secret.allowedLabels).map(([key, value]) => `${key}=${value}`).join(", ") : "any"),
+          h("td", { class: "used" }, secret.usedBy.join(", ") || "no job"),
+          h("td", { title: secret.updatedBy }, `${relative(secret.updatedAt)}${secret.staleKey ? " · older key" : ""}`),
+          h("td", {}, h("button", { class: "small-button", onclick: () => start(secret.name) }, "Replace"), " ",
+            h("button", {
+              class: "small-button danger", disabled: isBusy(`secret-delete:${secret.name}`),
+              onclick: () => {
+                if (!confirm(`Delete ${secret.name}? Jobs that use it are blocked until it is set again.`)) return;
+                busy(`secret-delete:${secret.name}`, async () => {
+                  try {
+                    await api(`/v1/secrets/${encodeURIComponent(secret.name)}`, { method: "DELETE" });
+                    toast(`Deleted ${secret.name}`);
+                    state.secrets = null;
+                    await loadSnapshot();
+                  } catch (error) {
+                    toast(error.message, { error: true });
+                  }
+                });
+              },
+            }, "Delete"))))))),
+    draft ? secretForm(draft) : h("div", { class: "actions" }, h("button", { class: "primary", id: "secret-add", onclick: () => start() }, "Add a secret")));
+}
+
+function secretForm(draft) {
+  const submit = async (event) => {
+    event.preventDefault();
+    const form = event.target;
+    const value = form.elements.value.value;
+    let labels;
+    try {
+      labels = draft.labels.trim() ? parseLabels(draft.labels) : undefined;
+    } catch (error) {
+      return toast(error.message, { error: true });
+    }
+    await busy("secret", async () => {
+      try {
+        const { data } = await api(`/v1/secrets/${encodeURIComponent(draft.name.trim())}`, { method: "PUT", body: { value, ...(labels ? { allowedLabels: labels } : {}) } });
+        form.reset();
+        state.editing = null;
+        state.secrets = null;
+        toast(`Saved ${data.name}${data.hint ? ` (${data.hint})` : ""}`);
+        await loadSnapshot();
+      } catch (error) {
+        toast(error.message, { error: true });
+      }
+    });
+  };
+  return h("form", { class: "card form secret-form", onsubmit: submit, autocomplete: "off", "data-edit": "secret" },
+    h("h2", { class: "card-title" }, draft.name ? `Set ${draft.name}` : "Add a secret"),
+    h("label", { class: "field" }, h("span", {}, "Name (lower case, digits, . _ -)"),
+      h("input", { type: "text", id: "secret-name", value: draft.name, required: true, pattern: "[a-z0-9][a-z0-9._\\-]{0,62}", oninput: (event) => { draft.name = event.target.value; } })),
+    h("label", { class: "field" }, h("span", {}, "Value (sent once, never shown again)"),
+      h("input", { type: "password", name: "value", id: "secret-value", required: true, autocomplete: "new-password", spellcheck: "false" })),
+    h("label", { class: "field" }, h("span", {}, "Only machines with labels (key=value, comma-separated; empty keeps the current ones, or any machine)"),
+      h("input", { type: "text", id: "secret-labels", value: draft.labels, placeholder: "site=home", oninput: (event) => { draft.labels = event.target.value; } })),
+    h("div", { class: "actions" },
+      h("button", { class: "primary", type: "submit", disabled: isBusy("secret") }, "Seal and save"),
       h("button", { type: "button", onclick: () => { state.editing = null; render(); } }, "Cancel")));
 }
 

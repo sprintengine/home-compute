@@ -8,6 +8,7 @@ import { vi } from "vitest";
 import { clearAccessKeys } from "../src/access.mjs";
 import core, { handleCore } from "../src/hc-core.mjs";
 import { clearJobCache } from "../src/jobcache.mjs";
+import { clearSecretsCache } from "../src/secrets.mjs";
 import { handle } from "../src/hc-web.mjs";
 
 export const TEAM = env.ACCESS_TEAM_DOMAIN;
@@ -106,10 +107,11 @@ export async function call(path, { method = "GET", body, identity = OWNER, heade
 }
 
 export async function resetDatabase() {
-  await env.DB.batch(["run_logs", "runs", "schedule_state", "jobs", "machines", "join_tokens", "secrets", "audit_log", "settings"]
+  await env.DB.batch(["run_logs", "runs", "schedule_state", "jobs", "machines", "join_tokens", "secrets", "audit_log", "settings", "alerts"]
     .map((table) => env.DB.prepare(`DELETE FROM ${table}`)));
-  // jobs_version starts again from nothing, so hc-core's cached job set must go too.
+  // jobs_version and secrets_version start again from nothing, so hc-core's caches must go too.
   clearJobCache();
+  clearSecretsCache();
 }
 
 // ---------- hc-core and agents

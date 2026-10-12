@@ -5,7 +5,9 @@
 // import would create or change. Imports are explicit and diffed; a field
 // edited in the dashboard since the last import is kept unless forced.
 
-import { ENV_NAME, JOB_ID, jobDifferences, jobEnvironmentNames, normaliseJob, validateReport, validateSchedule } from "./job.mjs";
+import {
+  ENV_NAME, JOB_ID, jobDifferences, jobEnvironmentNames, normaliseFreshness, normaliseJob, validateReport, validateSchedule,
+} from "./job.mjs";
 
 const SECRET_NAME = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 const TEMPLATE = /\$\{([A-Z_][A-Z0-9_]*)\}/g;
@@ -18,15 +20,19 @@ function isObject(value) {
 
 /**
  * A preset, checked: `{id, secrets: {ENV: secret-name}, env: {ENV: value},
- * placement, policy, network, variables: {NAME: value}}`. `variables` fill
- * `${NAME}` in v1 images (Wingfoil's `${WINGFOIL_IMAGE}`); `--image` on the
- * command line overrides them.
+ * placement, policy, network, variables: {NAME: value}, freshness}`.
+ * `variables` fill `${NAME}` in v1 images (Wingfoil's `${WINGFOIL_IMAGE}`);
+ * `--image` on the command line overrides them. `freshness` is
+ * `{baseUrl?, label?, outputs: {value: {maxAgeHours, pointer?}}}`: each job
+ * whose report tracks one of those values (its id, or a value of its
+ * `label`, comma-separated) gets `report.freshness` for it, with `url` =
+ * `baseUrl` + `pointer` (the stale-output alert).
  */
 export function validatePreset(preset) {
   if (preset === undefined || preset === null) return null;
   if (!isObject(preset)) throw new Error("The preset must be an object");
   if (!JOB_ID.test(preset.id ?? "")) throw new Error(`Invalid preset id ${JSON.stringify(preset.id)}`);
-  const known = new Set(["$comment", "id", "secrets", "env", "placement", "policy", "network", "variables"]);
+  const known = new Set(["$comment", "id", "secrets", "env", "placement", "policy", "network", "variables", "freshness", "registryAuth"]);
   const unknown = Object.keys(preset).filter((key) => !known.has(key));
   if (unknown.length) throw new Error(`Unknown preset field ${unknown.join(", ")}`);
   const names = (value, description, check) => {
@@ -52,7 +58,44 @@ export function validatePreset(preset) {
   for (const key of ["placement", "policy"]) {
     if (preset[key] !== undefined && !isObject(preset[key])) throw new Error(`preset.${key} must be an object`);
   }
-  return { id: preset.id, secrets, env, variables, placement: preset.placement ?? {}, policy: preset.policy ?? {}, network: preset.network };
+  return {
+    id: preset.id, secrets, env, variables, placement: preset.placement ?? {}, policy: preset.policy ?? {}, network: preset.network,
+    freshness: validateFreshness(preset.freshness),
+    registryAuth: preset.registryAuth ?? null,
+  };
+}
+
+function validateFreshness(freshness) {
+  if (freshness === undefined || freshness === null) return null;
+  if (!isObject(freshness)) throw new Error("preset.freshness must be an object");
+  const unknown = Object.keys(freshness).filter((key) => !["$comment", "baseUrl", "label", "outputs"].includes(key));
+  if (unknown.length) throw new Error(`Unknown preset.freshness field ${unknown.join(", ")}`);
+  if (freshness.baseUrl !== undefined && (typeof freshness.baseUrl !== "string" || !/^https:\/\/\S+\/$/.test(freshness.baseUrl))) {
+    throw new Error("preset.freshness.baseUrl must be an https:// URL ending in /");
+  }
+  if (freshness.label !== undefined && (typeof freshness.label !== "string" || !freshness.label)) throw new Error("preset.freshness.label must be a label name");
+  if (!isObject(freshness.outputs)) throw new Error("preset.freshness.outputs must be an object");
+  const outputs = {};
+  for (const [value, entry] of Object.entries(freshness.outputs)) {
+    if (!isObject(entry)) throw new Error(`preset.freshness.outputs.${value} must be an object`);
+    if (entry.pointer !== undefined && (typeof entry.pointer !== "string" || !/^[A-Za-z0-9][\w./-]*$/.test(entry.pointer))) {
+      throw new Error(`preset.freshness.outputs.${value}.pointer must be a relative path`);
+    }
+    if (entry.pointer && !freshness.baseUrl) throw new Error("preset.freshness needs baseUrl for its pointers");
+    const url = entry.pointer ? `${freshness.baseUrl}${entry.pointer}` : undefined;
+    outputs[value] = normaliseFreshness({ [value]: { maxAgeHours: entry.maxAgeHours, ...(url ? { url } : {}) } }, "preset.freshness.outputs")[value];
+  }
+  return { label: freshness.label ?? null, outputs };
+}
+
+/** The preset's freshness entries for a v1 job: those of its id and of its label's values. */
+function freshnessFor(v1, preset) {
+  const outputs = preset?.freshness?.outputs;
+  if (!outputs) return {};
+  const values = new Set([v1.id]);
+  const label = preset.freshness.label ? v1.labels?.[preset.freshness.label] : null;
+  for (const value of String(label ?? "").split(",").map((item) => item.trim()).filter(Boolean)) values.add(value);
+  return Object.fromEntries([...values].filter((value) => outputs[value]).map((value) => [value, outputs[value]]));
 }
 
 /** Bacalhau's CPU string ("1", "0.5", "500m") as a number of CPUs. */
@@ -138,9 +181,10 @@ export function jobFromV1(v1, { preset = null, variables = {} } = {}) {
     schedule: v1.schedule,
     placement: preset?.placement ?? {},
     policy,
-    report: task.report ?? null,
+    report: task.report ? { ...task.report, ...(Object.keys(freshnessFor(v1, preset)).length ? { freshness: freshnessFor(v1, preset) } : {}) } : null,
     network: networkType === "none" ? "none" : (preset?.network ?? "bridge"),
     labels: v1.labels ?? {},
+    registryAuth: preset?.registryAuth ?? null,
   });
   return { job, warnings };
 }

@@ -298,12 +298,14 @@ test("a slot's run is created lazily by the sync just after it, when the cron is
   const worker = await agent("box");
   clock.advance(19 * 60_000 + 50_000);
   const idle = await worker.syncOnce();
-  assert.ok(idle.nextSyncInMs > 11_900 && idle.nextSyncInMs <= 12_000, `2 s after the 08:20 slot, not ${idle.nextSyncInMs}`);
+  // The shared clock moves on in real time while the sync is answered, by more than 100 ms on a busy runner.
+  assert.ok(idle.nextSyncInMs > 11_000 && idle.nextSyncInMs <= 12_000, `2 s after the 08:20 slot, not ${idle.nextSyncInMs}`);
   assert.deepEqual(idle.upcoming.map((entry) => [entry.jobId, new Date(entry.dueAt).toISOString()]), [["blend", "2026-11-02T08:20:00.000Z"]]);
   clock.advance(12_000);
   await worker.syncOnce();
   const [run] = await plane.runs("blend");
-  assert.deepEqual([run.slot_at, run.state === "claimed" || run.state === "running" || run.state === "succeeded"], [Date.parse("2026-11-02T08:20:00Z"), true]);
+  // Claimed in that sync; how far the fake run got by now depends on the machine's speed (CI once saw it between phases).
+  assert.deepEqual([run.slot_at, ["claimed", "pulling", "running", "reporting", "succeeded"].includes(run.state)], [Date.parse("2026-11-02T08:20:00Z"), true], run.state);
   assert.ok(worker.runs.has(run.id));
   await worker.idle();
   await plane.cron(clock.now());

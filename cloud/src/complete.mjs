@@ -100,7 +100,8 @@ function settle(db, run, job, published, record, now) {
     const every = job?.schedule?.every ? now + parseDuration(job.schedule.every) : null;
     // A late (recovered) result must not replace a newer run's: if a later run of the job has finished, it stays the job's last.
     statements.push(db.prepare(`UPDATE schedule_state SET last_run_id = ?1, last_state = ?2, last_finished_at = ?3, last_outcome = ?4,
-        published_json = ?5, next_due_at = CASE WHEN ?6 IS NULL THEN next_due_at ELSE ?6 END
+        published_json = ?5, next_due_at = CASE WHEN ?6 IS NULL THEN next_due_at ELSE ?6 END,
+        fail_streak = CASE WHEN ?4 = 'failed' THEN fail_streak + 1 ELSE 0 END
       WHERE job_id = ?7 AND ${settled}
         AND NOT EXISTS (SELECT 1 FROM runs n WHERE n.job_id = ?7 AND n.id != ?1 AND n.due_at > ?8 AND n.finished_at IS NOT NULL
           AND n.state NOT IN ('skipped', 'cancelled'))`)

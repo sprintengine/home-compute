@@ -77,3 +77,68 @@ test("a created job is summarised on one line", () => {
   }, { url: "https://hc.example.com" });
   assert.equal(text, "Import into https://hc.example.com\n+ prune  create  hourly at :10 · 0.5 CPU 512 MiB · 1500 s\n1 to create, 0 to update, 0 with kept edits, 0 unchanged.\n");
 });
+
+test("cloud secrets put-env seals the preset's secrets from an env file and prints names only", async () => {
+  const { mkdtemp, writeFile } = await import("node:fs/promises");
+  const os = await import("node:os");
+  const directory = await mkdtemp(path.join(os.tmpdir(), "hc-cli-"));
+  const envFile = path.join(directory, ".env");
+  const values = {
+    S3_BUCKET: "bucket-value-test", S3_ENDPOINT_URL: "https://endpoint.example.com", AWS_ACCESS_KEY_ID: "TESTKEYID0000000000000000000ABCD",
+    AWS_SECRET_ACCESS_KEY: "secret-value-test-0123456789",
+  };
+  await writeFile(envFile, `# comment\n${Object.entries(values).map(([name, value]) => `${name}=${value}`).join("\n")}\nOTHER=x\n`);
+  const sent = [];
+  const fetcher = async (url, init) => {
+    sent.push({ url, method: init.method, body: JSON.parse(init.body), headers: init.headers });
+    const name = decodeURIComponent(url.split("/").pop());
+    return Response.json({ name, set: true, keyId: "v1-abc", hint: name.endsWith("key-id") ? "…ABCD" : null, allowedLabels: { site: "home" } }, { status: 201 });
+  };
+  const stdout = output();
+  await cloudCommand(["secrets", "put-env", envFile, "--preset", "wingfoil", "--labels", "site=home"], { environment, fetcher, stdout });
+  assert.deepEqual(sent.map((request) => [request.method, request.url]), [
+    ["PUT", "https://hc.example.com/v1/secrets/wingfoil-r2-bucket"],
+    ["PUT", "https://hc.example.com/v1/secrets/wingfoil-r2-endpoint"],
+    ["PUT", "https://hc.example.com/v1/secrets/wingfoil-r2-key-id"],
+    ["PUT", "https://hc.example.com/v1/secrets/wingfoil-r2-secret"],
+  ]);
+  assert.deepEqual(sent.map((request) => request.body), [
+    { value: values.S3_BUCKET, allowedLabels: { site: "home" } }, { value: values.S3_ENDPOINT_URL, allowedLabels: { site: "home" } },
+    { value: values.AWS_ACCESS_KEY_ID, allowedLabels: { site: "home" } }, { value: values.AWS_SECRET_ACCESS_KEY, allowedLabels: { site: "home" } },
+  ]);
+  assert.equal(sent[0].headers["cf-access-client-id"], "id.access");
+  for (const value of Object.values(values)) assert.ok(!stdout.text.includes(value), "a value was printed");
+  assert.match(stdout.text, /^set wingfoil-r2-bucket \(from S3_BUCKET\), for machines with site=home$/m);
+  assert.match(stdout.text, /^set wingfoil-r2-key-id \(from AWS_ACCESS_KEY_ID\) …ABCD, for machines with site=home$/m);
+
+  // A missing value uploads nothing.
+  await writeFile(envFile, "S3_BUCKET=x\n");
+  sent.length = 0;
+  await assert.rejects(cloudCommand(["secrets", "put-env", envFile, "--preset", "wingfoil"], { environment, fetcher, stdout: output() }),
+    /no value for S3_ENDPOINT_URL, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY; nothing was uploaded/);
+  assert.equal(sent.length, 0);
+});
+
+test("cloud secrets put reads the value from stdin, never argv, and list shows no values", async () => {
+  const { Readable } = await import("node:stream");
+  const sent = [];
+  const fetcher = async (url, init) => {
+    sent.push({ url, method: init.method, body: init.body ? JSON.parse(init.body) : null });
+    if (init.method === "GET") {
+      return Response.json({
+        vault: { configured: true, keyId: "v1-abc" },
+        secrets: [{ name: "ghcr-user", set: true, keyId: "v1-abc", hint: "…ABCD", allowedLabels: {}, updatedAt: "2026-10-12T00:00:00.000Z", updatedBy: "me", usedBy: ["a"] }],
+        missing: [{ name: "r2", set: false, usedBy: ["b"] }],
+      });
+    }
+    return Response.json({ name: "ghcr-user", set: true, keyId: "v1-abc", hint: null, allowedLabels: {} }, { status: 201 });
+  };
+  const stdout = output();
+  await cloudCommand(["secrets", "put", "ghcr-user"], { environment, fetcher, stdout, stdin: Readable.from(["value-from-stdin\n"]) });
+  assert.deepEqual(sent[0], { url: "https://hc.example.com/v1/secrets/ghcr-user", method: "PUT", body: { value: "value-from-stdin" } });
+  assert.ok(!stdout.text.includes("value-from-stdin"));
+  await assert.rejects(cloudCommand(["secrets", "put", "x"], { environment, fetcher, stdout, stdin: { isTTY: true } }), /reads the value from stdin/);
+  const listed = output();
+  await cloudCommand(["secrets", "list"], { environment, fetcher, stdout: listed });
+  assert.match(listed.text, /^Vault: key v1-abc\n {2}ghcr-user …ABCD · used by a · 2026-10-12T00:00:00.000Z by me\n {2}r2 NOT SET · needed by b\n$/);
+});

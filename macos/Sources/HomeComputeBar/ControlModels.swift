@@ -164,6 +164,35 @@ struct SetupState: Decodable, Sendable, Equatable {
     var isStarting: Bool {
         services?.controller?.state?.lowercased() == "starting" || services?.bacalhau?.state?.lowercased() == "starting"
     }
+
+    /// The services launchd says are not loaded (or not installed): the only ones it is right to call stopped.
+    var stoppedServices: [String] {
+        [("Colima", services?.colima?.state), ("Bacalhau", services?.bacalhau?.state), ("scheduler", services?.controller?.state)]
+            .filter { ["stopped", "missing"].contains($0.1?.lowercased() ?? "") }
+            .map(\.0)
+    }
+}
+
+/// What the popover's scheduler banner says. "Stopped" (with a Start button)
+/// only when the setup script's `state` says a service is not loaded; a
+/// scheduler that merely does not answer the app, or whose check timed out
+/// (`unknown`), is "not answering": a busy Mac is not a stopped one, and
+/// pressing Start then restarts services that were running.
+enum SchedulerBanner: Equatable {
+    case stopped(String)
+    case notAnswering(String)
+
+    static func decide(state: SetupState?, unreachable: Bool) -> SchedulerBanner? {
+        guard let state else {
+            return unreachable ? .notAnswering("The app can't reach the scheduler; checking whether it is running…") : nil
+        }
+        let stopped = state.stoppedServices
+        if !stopped.isEmpty { return .stopped("Not running: " + stopped.joined(separator: ", ")) }
+        if unreachable || state.isStopped {
+            return .notAnswering("Its services are loaded but it isn't answering yet (the Mac may be busy). It usually recovers by itself.")
+        }
+        return nil
+    }
 }
 
 /// `macmini.sh env --json`

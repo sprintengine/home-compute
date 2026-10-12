@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { boundLines, extractError } from "../src/core/logs.mjs";
 import {
-  claimBlockers, effectiveFree, fits, machineAvailable, nextSyncDelay, placementRefusal, preferredUntil, subtract,
+  claimBlockers, effectiveFree, fits, machineAvailable, nextSyncDelay, placementRefusal, preferredUntil, secretsRefused, subtract,
 } from "../src/core/placement.mjs";
 import {
   newCredential, newJoinToken, JOIN_TOKEN, OFFLINE_MS, parseCredential, sha256Hex, SYNC_BUSY_MS, SYNC_IDLE_MS,
@@ -58,9 +58,20 @@ test("capacity: a run fits the machine's free figures, capped by the dashboard's
   assert.deepEqual(effectiveFree(free, {}, []), free);
 });
 
-test("vault references block claims until the vault exists; local ones do not", () => {
+test("a vault reference blocks claims until the vault holds that secret; local ones never do", () => {
   assert.deepEqual(claimBlockers({ secretEnv: { TOKEN: "local:TOKEN" } }), []);
-  assert.match(claimBlockers({ secretEnv: { A: "vault:wingfoil-r2", B: "vault:wingfoil-r2" } })[0], /vault.*wingfoil-r2$/);
+  const vaulted = { secretEnv: { A: "vault:wingfoil-r2", B: "vault:wingfoil-r2", C: "vault:other" } };
+  assert.match(claimBlockers(vaulted)[0], /not set: other, wingfoil-r2$/);
+  assert.match(claimBlockers(vaulted, new Map([["wingfoil-r2", { allowedLabels: {} }]]))[0], /not set: other$/);
+  assert.deepEqual(claimBlockers(vaulted, new Map([["wingfoil-r2", { allowedLabels: {} }], ["other", { allowedLabels: {} }]])), []);
+});
+
+test("a secret goes only to machines whose labels match its allowed labels", () => {
+  const secrets = new Map([["r2", { allowedLabels: { site: "home" } }], ["open", { allowedLabels: {} }]]);
+  const vaulted = { secretEnv: { A: "vault:r2", B: "vault:open", C: "vault:unset" } };
+  assert.deepEqual(secretsRefused(vaulted, { labels: { site: "home", os: "darwin" } }, secrets), []);
+  assert.deepEqual(secretsRefused(vaulted, { labels: { site: "cloud" } }, secrets), ["r2"]);
+  assert.deepEqual(secretsRefused(vaulted, { labels: {} }, secrets), ["r2"], "a secret that is not set is a blocker, not a refusal");
 });
 
 test("the server sets the sync interval: 10 s busy, else 30 s or 2 s after the next slot", () => {

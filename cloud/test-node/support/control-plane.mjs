@@ -17,7 +17,7 @@ let bundled = null;
 async function bundle() {
   bundled ??= build({
     entryPoints: [path.join(import.meta.dirname, "core-under-test.mjs")],
-    bundle: true, format: "esm", platform: "neutral", target: "es2022", write: false, logLevel: "warning",
+    bundle: true, format: "esm", platform: "neutral", target: "es2022", write: false, logLevel: "warning", external: ["cloudflare:*"],
   }).then((result) => result.outputFiles[0].text);
   return bundled;
 }
