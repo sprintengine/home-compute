@@ -303,7 +303,8 @@ test("a slot's run is created lazily by the sync just after it, when the cron is
   clock.advance(12_000);
   await worker.syncOnce();
   const [run] = await plane.runs("blend");
-  assert.deepEqual([run.slot_at, run.state === "claimed" || run.state === "running" || run.state === "succeeded"], [Date.parse("2026-11-02T08:20:00Z"), true]);
+  // Claimed in that sync; how far the fake run got by now depends on the machine's speed (CI once saw it between phases).
+  assert.deepEqual([run.slot_at, ["claimed", "pulling", "running", "reporting", "succeeded"].includes(run.state)], [Date.parse("2026-11-02T08:20:00Z"), true], run.state);
   assert.ok(worker.runs.has(run.id));
   await worker.idle();
   await plane.cron(clock.now());
