@@ -55,12 +55,18 @@ const SCRIPTS = {
 
 async function waitFor(check, what, timeoutMs = 90_000) {
   const deadline = Date.now() + timeoutMs;
+  let lastError = null;
   while (Date.now() < deadline) {
-    const value = await check();
-    if (value) return value;
+    try {
+      const value = await check();
+      if (value) return value;
+    } catch (error) {
+      // wrangler dev has answered one read with a 500 while the agent was busy; ask again.
+      lastError = error;
+    }
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
-  throw new Error(`timed out waiting for ${what}`);
+  throw new Error(`timed out waiting for ${what}${lastError ? ` (last error: ${lastError.message})` : ""}`);
 }
 
 function runRow(run) {
@@ -87,12 +93,26 @@ function history(job, { machineId, count, seconds, everyMs, now, failedEvery = 0
 }
 
 /**
- * Seeds `stack` (from startDevStack). Returns `{agentStop(), ids}`; the
- * agent and the scripted machine keep running until `agentStop`.
+ * Seeds `stack` (from startDevStack). Returns `{stop(), ids, agentLog()}`;
+ * the agent and the scripted machine keep running until `stop`. If seeding
+ * fails partway they are stopped before the error is thrown: left running,
+ * they would keep the test process alive for as long as slow's 6 h script.
  */
 export async function seedDashboard(stack) {
-  const now = Date.now();
   const cleanups = [];
+  const stop = async () => {
+    for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
+  };
+  try {
+    return { ...(await seed(stack, cleanups)), stop };
+  } catch (error) {
+    await stop();
+    throw error;
+  }
+}
+
+async function seed(stack, cleanups) {
+  const now = Date.now();
   // 1. Wingfoil's timetable through the CLI, as an owner would import it.
   await execFile(process.execPath, [CLI, "cloud", "import", FIXTURE, "--preset", "wingfoil", "--image", WINGFOIL_IMAGE],
     { env: { ...process.env, HC_URL: stack.web, HC_ACCESS_JWT: stack.seedToken } });
@@ -133,6 +153,7 @@ export async function seedDashboard(stack) {
     body: JSON.stringify({ protocol: 1, joinToken: linuxToken, facts: { os: "linux", arch: "amd64", runtime: "colima", agentVersion: "0.2.0" } }),
   })).json();
   let linuxTimer = null;
+  let linuxStopped = false;
   const linuxSync = async () => {
     try {
       await fetch(`${stack.core}/agent/v1/sync`, {
@@ -147,10 +168,11 @@ export async function seedDashboard(stack) {
     } catch {
       // The stack is going away.
     }
-    linuxTimer = setTimeout(linuxSync, 20_000);
+    // A sync still in flight when it is stopped must not schedule another.
+    if (!linuxStopped) linuxTimer = setTimeout(linuxSync, 20_000);
   };
   await linuxSync();
-  cleanups.push(async () => clearTimeout(linuxTimer));
+  cleanups.push(async () => { linuxStopped = true; clearTimeout(linuxTimer); });
 
   // 4. Straight into D1: an offline machine on an old agent, older history, a lost run, published models.
   const oldBox = newId("m", now - 40 * 24 * HOUR);
@@ -205,8 +227,5 @@ export async function seedDashboard(stack) {
   return {
     ids: { runs, machines: { mac: mac.id, linux: linux.machineId, oldBox } },
     agentLog: () => agentLog,
-    async stop() {
-      for (const cleanup of cleanups.reverse()) await cleanup();
-    },
   };
 }

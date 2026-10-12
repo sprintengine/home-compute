@@ -5,7 +5,7 @@
   "description": "Home Compute's hosted control plane: the hc-web and hc-core Workers and their D1 schema.",
   "type": "module",
   "scripts": {
-    "test": "vitest run && node --test 'test-node/*.test.mjs'",
+    "test": "vitest run && node --test --test-force-exit --test-timeout=300000 'test-node/*.test.mjs'",
     "dev:web": "wrangler dev -c wrangler.web.jsonc --persist-to .wrangler/state",
     "dev:core": "wrangler dev -c wrangler.core.jsonc --persist-to .wrangler/state --test-scheduled --port 8788 --inspector-port 9230",
     "migrate:local": "wrangler d1 migrations apply home-compute --local -c wrangler.web.jsonc --persist-to .wrangler/state",

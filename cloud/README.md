@@ -82,6 +82,11 @@ chromium`); `--serve` does not.
 npm test --workspace @home-compute/cloud
 ```
 
+The `test-node` files run with `--test-force-exit` and a five-minute
+default timeout per test, so a server, agent or timer a failed test leaves
+behind cannot hold the run open (a failed seed once kept CI waiting six
+hours); CI also stops the whole job after 30 minutes.
+
 - `test/*.test.mjs` run inside workerd with a local D1 that has the real
   migrations applied (`@cloudflare/vitest-plugin` 1.4 with Vitest 5, the
   successor to `@cloudflare/vitest-pool-workers`, per Cloudflare's docs on
