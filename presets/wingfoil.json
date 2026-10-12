@@ -15,5 +15,32 @@
     "retry": { "maxAttempts": 3, "onLostRunning": true, "onFailed": 0 }
   },
   "network": "bridge",
-  "variables": { "WINGFOIL_IMAGE": "ghcr.io/sprintengine/wingfoil-forecast:production" }
+  "variables": { "WINGFOIL_IMAGE": "ghcr.io/sprintengine/wingfoil-forecast:production" },
+  "freshness": {
+    "$comment": "The stale-output alert. maxAgeHours per model is the limit Wingfoil's status page calls stale (force5/ingest/registry.py); pointer is the model's published manifest on the data domain, read every 15 minutes, so the alert works whichever system ran the job.",
+    "baseUrl": "https://data.wingfoil.ie/",
+    "label": "models",
+    "outputs": {
+      "harmonie": { "maxAgeHours": 30, "pointer": "weather/harmonie.json" },
+      "icon-eu": { "maxAgeHours": 30, "pointer": "weather/latest.json" },
+      "icon-eu-weather": { "maxAgeHours": 30, "pointer": "weather/icon-eu-weather.json" },
+      "ecmwf": { "maxAgeHours": 40, "pointer": "weather/ecmwf.json" },
+      "ecmwf-ens": { "maxAgeHours": 36, "pointer": "weather/ecmwf-ens.json" },
+      "aifs": { "maxAgeHours": 12, "pointer": "weather/aifs.json" },
+      "ecmwf-wave": { "maxAgeHours": 24, "pointer": "weather/ecmwf-wave.json" },
+      "gfs": { "maxAgeHours": 12, "pointer": "weather/gfs.json" },
+      "gefs": { "maxAgeHours": 18, "pointer": "weather/gefs.json" },
+      "arpege": { "maxAgeHours": 12, "pointer": "weather/arpege.json" },
+      "arome": { "maxAgeHours": 12, "pointer": "weather/arome.json" },
+      "harmonie-eps": { "maxAgeHours": 12, "pointer": "weather/harmonie-eps.json" },
+      "gfs-wave": { "maxAgeHours": 12, "pointer": "weather/gfs-wave.json" },
+      "tides": { "maxAgeHours": 30, "pointer": "marine/tides.json" },
+      "sea-temperature": { "maxAgeHours": 48, "pointer": "marine/sea-temperature.json" },
+      "mi-swan": { "maxAgeHours": 36, "pointer": "weather/mi-swan.json" },
+      "blend": { "maxAgeHours": 3, "pointer": "weather/blend.json" },
+      "wind-obs": { "maxAgeHours": 6, "pointer": "marine/wind-observations.json" },
+      "forecast-archive": { "maxAgeHours": 3, "pointer": "verify/forecast-archive.json" },
+      "verify": { "maxAgeHours": 36, "pointer": "verify/scores.json" }
+    }
+  }
 }

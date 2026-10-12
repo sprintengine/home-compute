@@ -4,11 +4,12 @@
 // `machine`, `revision`…) are additions; `nodes` aliases `machines`.
 
 import { summarizeRun } from "../../src/core/history.mjs";
-import { claimBlockers, labelsMatch, machineAvailable, unhealthyReason } from "../../src/core/placement.mjs";
+import { claimBlockers, labelsMatch, machineAvailable, secretsRefused, unhealthyReason } from "../../src/core/placement.mjs";
 import { OFFLINE_MS } from "../../src/core/protocol.mjs";
 import { nextSlot, upcomingAt } from "../../src/core/schedule.mjs";
 import { iso } from "./http.mjs";
 import { jobFromRow, machineFromRow, NON_TERMINAL_SQL, runFromRow } from "./db.mjs";
+import { alertState } from "./alerts.mjs";
 
 const RECENT_RUNS = 5;
 /** Runs per job read for the overview's duration sparkline; `recentRuns` keeps its 5. */
@@ -167,17 +168,19 @@ function minutes(ms) {
  * Why a due run is still waiting (§3.5: "waiting 12 min: preferred mac-mini
  * busy"), from the same rules hc-core claims by.
  */
-export function waitingReason(job, run, machines, now, { globalPause }) {
+export function waitingReason(job, run, machines, now, { globalPause, secrets = new Map() }) {
   const waited = `waiting ${minutes(now - run.due_at)}`;
-  const blockers = claimBlockers(job);
+  const blockers = claimBlockers(job, secrets);
   if (blockers.length) return `blocked: ${blockers.join("; ")}`;
   if (run.source !== "manual" && (job.paused || globalPause || !job.enabled)) return `${waited}: paused`;
   const required = job.placement?.requireLabels ?? {};
-  const matching = machines.filter((machine) => !machine.revokedAt && labelsMatch(required, machine.labels));
-  if (!matching.length) {
+  const labelled = machines.filter((machine) => !machine.revokedAt && labelsMatch(required, machine.labels));
+  if (!labelled.length) {
     const labels = Object.entries(required).map(([key, value]) => `${key}=${value}`).join(", ");
     return `${waited}: no machine has ${labels ? `labels ${labels}` : "enrolled"}`;
   }
+  const matching = labelled.filter((machine) => !secretsRefused(job, machine, secrets).length);
+  if (!matching.length) return `${waited}: no machine may receive ${secretsRefused(job, labelled[0], secrets).join(", ")} (the secrets' allowed labels)`;
   const preferred = job.placement?.preferMachines ?? [];
   const available = matching.filter((machine) => machineAvailable(machine, now));
   if (preferred.length && run.preferred_until && now < run.preferred_until) {
@@ -192,11 +195,12 @@ export function waitingReason(job, run, machines, now, { globalPause }) {
  * Which machine a job's next run would most likely go to, or why none can:
  * hc-core's placement rules without capacity, which changes by the minute.
  */
-export function expectedMachine(job, machines, now) {
-  const blockers = claimBlockers(job);
+export function expectedMachine(job, machines, now, secrets = new Map()) {
+  const blockers = claimBlockers(job, secrets);
   if (blockers.length) return { machine: null, note: `blocked: ${blockers.join("; ")}` };
   const required = job.placement?.requireLabels ?? {};
-  const matching = machines.filter((machine) => !machine.revokedAt && labelsMatch(required, machine.labels));
+  const matching = machines.filter((machine) => !machine.revokedAt && labelsMatch(required, machine.labels)
+    && !secretsRefused(job, machine, secrets).length);
   if (!matching.length) {
     const labels = Object.entries(required).map(([key, value]) => `${key}=${value}`).join(", ");
     return { machine: null, note: labels ? `no machine has labels ${labels}` : "no machine enrolled" };
@@ -214,7 +218,7 @@ export function expectedMachine(job, machines, now) {
  * machine expected to take it. `next` is each job's own next due time
  * (upcomingAt); an `at` job's later slots follow from its timetable.
  */
-export function upcomingSlots(jobs, next, machines, now, { globalPause = false, count = UPCOMING_SLOTS } = {}) {
+export function upcomingSlots(jobs, next, machines, now, { globalPause = false, count = UPCOMING_SLOTS, secrets = new Map() } = {}) {
   if (globalPause) return [];
   const slots = [];
   for (const job of jobs) {
@@ -233,7 +237,7 @@ export function upcomingSlots(jobs, next, machines, now, { globalPause = false, 
   slots.sort((a, b) => a.at - b.at || a.job.id.localeCompare(b.job.id));
   const expected = new Map();
   return slots.slice(0, count).map(({ job, at }) => {
-    if (!expected.has(job.id)) expected.set(job.id, expectedMachine(job, machines, now));
+    if (!expected.has(job.id)) expected.set(job.id, expectedMachine(job, machines, now, secrets));
     return { job: job.id, at: iso(at), ...expected.get(job.id) };
   });
 }
@@ -244,7 +248,7 @@ export function upcomingSlots(jobs, next, machines, now, { globalPause = false, 
  * a UNION ALL per job would hit D1's limit on compound SELECTs.
  */
 export async function buildSnapshot(db, now) {
-  const [jobs, open, settings, machines, recentRows, lastReportRows, latestRows, durationRows, lostRows] = await db.batch([
+  const [jobs, open, settings, machines, recentRows, lastReportRows, latestRows, durationRows, lostRows, secretRows] = await db.batch([
     db.prepare(`SELECT j.*, s.last_slot_at, s.last_finished_at, s.published_json AS state_published_json
       FROM jobs j LEFT JOIN schedule_state s ON s.job_id = j.id ORDER BY j.id`),
     db.prepare(`SELECT ${RUN_LIST_COLUMNS} FROM runs WHERE state IN (${NON_TERMINAL_SQL})`),
@@ -264,7 +268,11 @@ export async function buildSnapshot(db, now) {
       (SELECT id FROM runs WHERE job_id = j.id AND state IN ('succeeded', 'failed', 'timed-out') ORDER BY due_at DESC LIMIT ${SPARKLINE_RUNS})`),
     // Runs lost in the last day (runs_by_state), for the dashboard's attention list.
     db.prepare(`SELECT ${RUN_LIST_COLUMNS} FROM runs WHERE state = 'lost' AND due_at >= ? ORDER BY due_at DESC LIMIT 20`).bind(now - LOST_WINDOW_MS),
+    // The vault's names and labels (never values): which jobs are blocked, and on which machines.
+    db.prepare("SELECT name, allowed_labels_json FROM secrets"),
   ]);
+  const secrets = new Map(secretRows.results.map((row) => [row.name, { allowedLabels: JSON.parse(row.allowed_labels_json ?? "{}") ?? {} }]));
+  const alerts = await alertState(db, now);
   const setting = Object.fromEntries(settings.results.map((row) => [row.key, JSON.parse(row.value_json)]));
   const globalPause = setting.global_pause === true;
   const openByJob = new Map();
@@ -294,7 +302,7 @@ export async function buildSnapshot(db, now) {
   const jobViews = jobs.results.map((row) => {
     const job = jobFromRow(row);
     jobsById.set(job.id, job);
-    const blocked = claimBlockers(job);
+    const blocked = claimBlockers(job, secrets);
     const { due, active } = openByJob.get(job.id) ?? {};
     const current = active ?? due;
     const runs = recent.get(job.id) ?? [];
@@ -328,7 +336,7 @@ export async function buildSnapshot(db, now) {
         phase: current.state,
         lastSubmittedAt: iso(current.due_at),
         ...(current.machine_id ? { machine: names.get(current.machine_id) ?? current.machine_id } : {}),
-        ...(current.state === "due" ? { waiting: waitingReason(job, current, machineObjects, now, { globalPause }) } : {}),
+        ...(current.state === "due" ? { waiting: waitingReason(job, current, machineObjects, now, { globalPause, secrets }) } : {}),
       } : runs[0] ? { lastSubmittedAt: runs[0].submittedAt } : {}),
       ...(finished ? {
         lastFinishedJobId: finished.id,
@@ -359,7 +367,7 @@ export async function buildSnapshot(db, now) {
   const activeRuns = open.results.map((row) => {
     const run = view(row);
     const job = jobsById.get(row.job_id);
-    return row.state === "due" && job ? { ...run, waiting: waitingReason(job, row, machineObjects, now, { globalPause }) } : run;
+    return row.state === "due" && job ? { ...run, waiting: waitingReason(job, row, machineObjects, now, { globalPause, secrets }) } : run;
   });
   return {
     version: 1,
@@ -368,16 +376,20 @@ export async function buildSnapshot(db, now) {
       status: "online",
       kind: "hosted",
       pollEvery: "60s",
-      features: ["history", "logs", "timetable", "machines", "import", "audit", "changes", "settings", "job-parts", "machine-runs"],
+      features: ["history", "logs", "timetable", "machines", "import", "audit", "changes", "settings", "job-parts", "machine-runs", "secrets", "alerts"],
       globalPause,
+      // The cron's heartbeat: stale means slots are not being created (the dashboard says so on every page).
+      cron: alerts.cron,
     },
+    // What the owner is told by email (open problems, the last day's resolved ones) and whether email works.
+    alerts: { open: alerts.open, resolved: alerts.resolved, email: alerts.email },
     timetable: { editable: true },
     jobs: jobViews,
     machines: machineViews,
     activeRuns,
     recentRuns: latestRows.results.map(view),
     // The next slots across jobs, each with the machine expected to take it.
-    upcoming: upcomingSlots([...jobsById.values()], nextByJob, machineObjects, now, { globalPause }),
+    upcoming: upcomingSlots([...jobsById.values()], nextByJob, machineObjects, now, { globalPause, secrets }),
     // Runs whose machine went quiet in the last day; a later finished run of the job settles them for people.
     lostRuns: lostRows.results.map(view),
     desiredAgentVersion: desiredVersion,

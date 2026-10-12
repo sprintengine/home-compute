@@ -32,7 +32,7 @@ test("a hosted job is normalised: defaults filled, keys ordered, references only
     schedule: { at: { hours: [8, 10], minutes: [0] } },
     placement: {},
     policy: { overlap: "coalesce", catchUp: "latest", retry: { maxAttempts: 3, onLostRunning: false, lostGraceSeconds: 600, onFailed: 0, backoffSeconds: 300 }, priority: 0 },
-    report: null, network: "bridge", labels: {},
+    report: null, network: "bridge", labels: {}, registryAuth: null,
   });
   assert.deepEqual(normaliseJob(job), job, "normalising is idempotent");
   assert.deepEqual(normaliseJob({ ...job, env: { B: "2", A: "1" } }).env, { A: "1", B: "2" });
@@ -57,6 +57,8 @@ test("a hosted job is normalised: defaults filled, keys ordered, references only
     [{ report: { format: "text" } }, /json-lines/],
     [{ entrypoint: [] }, /entrypoint/],
     [{ args: ["--a", 1] }, /args/],
+    [{ registryAuth: "ghcr-read" }, /registryAuth/],
+    [{ registryAuth: "vault:Bad Name" }, /registryAuth/],
   ]) {
     assert.throws(() => normaliseJob({ ...job, ...change }), message, JSON.stringify(change));
   }
@@ -70,7 +72,7 @@ test("job differences name each changed field with both values", () => {
     { field: "schedule", before: { every: "1h" }, after: { every: "2h" } },
   ]);
   assert.deepEqual(jobDifferences(before, before), []);
-  assert.equal(jobDifferences(null, before).length, 15, "against nothing, every field differs");
+  assert.equal(jobDifferences(null, before).length, 16, "against nothing, every field differs");
   assert.deepEqual(jobEnvironmentNames({ task: { passEnv: ["A", "B"], requiredEnv: ["B", "C"] } }), ["A", "B", "C"]);
 });
 

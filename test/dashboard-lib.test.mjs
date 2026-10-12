@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import {
-  attentionItems, bothClocks, installCommands, localScheduleText, memoryHint, nextRuns, parseArgs, parseLabels, parseRoute, peakMiB, phaseSteps,
+  alertBanners, attentionItems, bothClocks, installCommands, localScheduleText, memoryHint, nextRuns, parseArgs, parseLabels, parseRoute, peakMiB, phaseSteps,
   pinnedImage, runningNow, scheduleLine, scheduleText, slotsByHour, sparkBars, sparkSummary, timetableModel, vmUptime, zoneOffsetMinutes,
 } from "../dashboard/lib.js";
 
@@ -58,8 +58,8 @@ test("attention: failed and lost runs, long waits with why, machines, updates an
       { id: "off", configuredEnabled: false, lastOutcome: "failed" },
       { id: "backup", configuredEnabled: true, lastFinishedAt: ago(600) },
       { id: "settled", configuredEnabled: true, lastFinishedAt: ago(10) },
-      { id: "ecmwf", configuredEnabled: true, blocked: "needs vault secrets, which arrive in M5: r2" },
-      { id: "gfs", configuredEnabled: true, blocked: "needs vault secrets, which arrive in M5: r2" },
+      { id: "ecmwf", configuredEnabled: true, blocked: "needs vault secrets that are not set: r2" },
+      { id: "gfs", configuredEnabled: true, blocked: "needs vault secrets that are not set: r2" },
       { id: "render", configuredEnabled: true, running: true, phase: "due" },
       { id: "quick", configuredEnabled: true },
     ],
@@ -269,5 +269,32 @@ test("routes, old run links included", () => {
   assert.deepEqual(parseRoute("#/machines/add"), { page: "add-machine" });
   assert.deepEqual(parseRoute("#/machine/m_1"), { page: "machine", id: "m_1" });
   assert.deepEqual(parseRoute("#/audit"), { page: "audit" });
+  assert.deepEqual(parseRoute("#/secrets"), { page: "secrets" });
   assert.deepEqual(parseRoute("#/nonsense"), { page: "overview" });
+});
+
+test("the alert strip: a stopped cron first, then failing email and open alerts, most serious first; nothing for the local controller", () => {
+  const now = Date.parse("2026-10-12T12:00:00Z");
+  const snapshot = {
+    controller: { kind: "hosted", cron: { lastTickAt: "2026-10-12T11:50:00Z", stale: true } },
+    alerts: {
+      email: { ok: false, error: "destination address not verified", lastSentAt: null },
+      open: [
+        { kind: "waiting", target: "tides", summary: "tides has waited 16 min for a machine", openedAt: "2026-10-12T11:59:00Z", emailed: false },
+        { kind: "stale", target: "gfs:gfs", detail: { job: "gfs" }, summary: "gfs is 17.0 h old (limit 12 h)", openedAt: "2026-10-12T11:00:00Z", emailed: true },
+        { kind: "no-machine", target: null, summary: "No machine online for 11 min", openedAt: "2026-10-12T11:58:00Z", emailed: true },
+      ],
+    },
+  };
+  const items = alertBanners(snapshot, now);
+  assert.deepEqual(items.map((item) => [item.kind, item.tone]), [
+    ["cron", "critical"], ["stale", "critical"], ["no-machine", "critical"], ["email", "warning"], ["waiting", "warning"],
+  ]);
+  assert.match(items[0].detail, /last tick 10 min ago; no slots are being created/);
+  assert.equal(items[1].href, "#/job/gfs");
+  assert.equal(items[1].detail, "since 1 h ago · emailed");
+  assert.equal(items[2].href, "#/machines");
+  assert.equal(items[4].href, "#/job/tides");
+  assert.deepEqual(alertBanners({ controller: { kind: "local" }, alerts: snapshot.alerts }, now), []);
+  assert.deepEqual(alertBanners({ controller: { kind: "hosted", cron: { stale: false } }, alerts: { open: [], email: { ok: true } } }, now), []);
 });

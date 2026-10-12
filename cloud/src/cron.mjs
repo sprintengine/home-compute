@@ -8,6 +8,7 @@ import { newId } from "../../src/core/ids.mjs";
 import { preferredUntil } from "../../src/core/placement.mjs";
 import { lostRetry } from "../../src/core/run.mjs";
 import { materialise } from "../../src/core/schedule.mjs";
+import { alertMinute } from "./alerts.mjs";
 import { ACTIVE_SQL, NON_TERMINAL_SQL } from "./db.mjs";
 
 const TIMEOUT_GRACE_MS = 300_000;
@@ -163,14 +164,32 @@ export async function retryLostRuns(db, now) {
   return result.meta.changes;
 }
 
-/** The backstop for a run its agent never finished: `started_at + runSeconds + 300 s` (§3.6). */
+/**
+ * The backstop for a run its agent never finished: `started_at + runSeconds +
+ * 300 s` (§3.6). The job's schedule state records it as its last run and a
+ * failure (the failed-twice alert counts it).
+ */
 export async function timeOutRuns(db, now) {
-  const result = await db.prepare(`UPDATE runs SET state = 'timed-out', outcome = 'failed', timed_out = 1,
+  const { results } = await db.prepare(`UPDATE runs SET state = 'timed-out', outcome = 'failed', timed_out = 1,
       error = COALESCE(error, 'timed out: no result from the agent'), finished_at = ?1, lease_expires_at = NULL, updated_at = ?1
     WHERE id IN (SELECT r.id FROM runs r JOIN jobs j ON j.id = r.job_id
       WHERE r.state IN ('running', 'reporting') AND r.started_at IS NOT NULL
-        AND r.started_at + json_extract(j.timeouts_json, '$.runSeconds') * 1000 + ${TIMEOUT_GRACE_MS} < ?1)`).bind(now).run();
-  return result.meta.changes;
+        AND r.started_at + json_extract(j.timeouts_json, '$.runSeconds') * 1000 + ${TIMEOUT_GRACE_MS} < ?1)
+    RETURNING id, job_id`).bind(now).all();
+  if (results.length) await db.prepare(failedRunsStateSql()).bind(now, JSON.stringify(results.map((row) => ({ run: row.id, job: row.job_id })))).run();
+  return results.length;
+}
+
+/**
+ * Records runs the server failed itself (`[{run, job}]` as ?2, at ?1) as
+ * their jobs' last runs, one more failure in a row, unless a later run of
+ * the job has already finished.
+ */
+export function failedRunsStateSql() {
+  return `UPDATE schedule_state SET fail_streak = fail_streak + 1, last_state = 'failed', last_outcome = 'failed', last_finished_at = ?1,
+      last_run_id = (SELECT value->>'run' FROM json_each(?2) WHERE value->>'job' = schedule_state.job_id LIMIT 1)
+    WHERE job_id IN (SELECT value->>'job' FROM json_each(?2))
+      AND NOT EXISTS (SELECT 1 FROM runs n WHERE n.job_id = schedule_state.job_id AND n.finished_at > ?1)`;
 }
 
 /**
@@ -199,8 +218,12 @@ export async function applyRetention(db, now, overrides = {}) {
   return { skipped, logs, runs, audit };
 }
 
-/** One cron invocation. `now` is the trigger's scheduled time, so a late cron still counts its own minute. */
-export async function minute(env, now) {
+/**
+ * One cron invocation. `now` is the trigger's scheduled time, so a late cron
+ * still counts its own minute. Alerting comes last and on its own: a
+ * problem there never stops the scheduling above it.
+ */
+export async function minute(env, now, { alerts = {} } = {}) {
   const db = env.DB;
   const summary = { materialised: await materialiseAll(db, now) };
   summary.lost = await expireLeases(db, now);
@@ -209,6 +232,12 @@ export async function minute(env, now) {
   if (new Date(now).getUTCMinutes() === RETENTION_MINUTE) {
     const settings = await db.prepare("SELECT value_json FROM settings WHERE key = 'retention'").first();
     summary.retention = await applyRetention(db, now, parse(settings?.value_json, {}) ?? {});
+  }
+  try {
+    summary.alerts = await alertMinute(env, now, alerts);
+  } catch (error) {
+    console.error(JSON.stringify({ event: "alerts_error", error: String(error?.message ?? error) }));
+    summary.alerts = { error: String(error?.message ?? error) };
   }
   return summary;
 }

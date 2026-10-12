@@ -4,7 +4,7 @@
 
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import { validateConfig } from "./config.mjs";
+import { readEnvFile, validateConfig } from "./config.mjs";
 
 const PRESETS = path.resolve(import.meta.dirname, "../presets");
 const TEMPLATE = /\$\{([A-Z_][A-Z0-9_]*)\}/g;
@@ -12,12 +12,26 @@ const TEMPLATE = /\$\{([A-Z_][A-Z0-9_]*)\}/g;
 export const CLOUD_HELP = `Usage:
   home-compute cloud import FILE [--preset NAME|FILE] [--image REF] [--var NAME=VALUE]
                                  [--dry-run] [--force] [--paused] [--json]
+                                 [--env-file FILE --upload-secrets [--labels k=v,…]]
+  home-compute cloud secrets list [--json]
+  home-compute cloud secrets put NAME [--labels k=v,…]        (the value is read from stdin)
+  home-compute cloud secrets put-env FILE --preset NAME|FILE [--labels k=v,…]
+  home-compute cloud secrets delete NAME
+  home-compute cloud alert-test
 
 Imports a v1 home-compute.json job set into the hosted control plane and
 prints a per-job diff. --dry-run writes nothing. A field edited in the
 dashboard since the last import is kept unless --force. --paused imports new
 jobs paused. --image fills the \${…} variable in the file's images (Wingfoil's
-\${WINGFOIL_IMAGE}); --var sets any such variable.
+\${WINGFOIL_IMAGE}); --var sets any such variable. With --upload-secrets the
+preset's secrets are read from --env-file and put in the vault (as
+"secrets put-env" does).
+
+Secrets go to hc-web, which seals them with the vault's public key; nothing
+can read them back. Values are never taken from the command line: "put"
+reads stdin, "put-env" reads the preset's names from an env file. Only the
+names are printed. --labels limits which machines may receive the secrets.
+"alert-test" asks the control plane to send a test alert email.
 
 Environment:
   HC_URL                     hc-web's base URL, such as https://hc-web.example.workers.dev
@@ -43,12 +57,25 @@ function parseCloudArgs(argv) {
     } else if (arg === "--dry-run") options.dryRun = true;
     else if (arg === "--force") options.force = true;
     else if (arg === "--paused") options.paused = true;
+    else if (arg === "--env-file") options.envFile = value();
+    else if (arg === "--upload-secrets") options.uploadSecrets = true;
+    else if (arg === "--labels") options.labels = parseLabelList(value());
     else if (arg === "--json") options.json = true;
     else if (arg === "--help" || arg === "-h") options.help = true;
     else if (arg.startsWith("-")) throw new Error(`Unknown option ${arg}`);
     else options.positionals.push(arg);
   }
   return options;
+}
+
+function parseLabelList(text) {
+  const labels = {};
+  for (const pair of String(text).split(",").map((item) => item.trim()).filter(Boolean)) {
+    const match = pair.match(/^([^=\s]+)=(\S+)$/);
+    if (!match) throw new Error(`--labels needs key=value pairs, not ${JSON.stringify(pair)}`);
+    labels[match[1]] = match[2];
+  }
+  return labels;
 }
 
 async function readPreset(preset) {
@@ -153,14 +180,118 @@ async function importCommand(options, { environment, fetcher, stdout }) {
   return result;
 }
 
+function baseUrl(environment) {
+  const base = String(environment.HC_URL ?? "").replace(/\/+$/, "");
+  if (!/^https?:\/\//.test(base)) throw new Error("Set HC_URL to hc-web's base URL (https://…)");
+  return base;
+}
+
+/** One JSON request to hc-web, through Access; an error says the status and hc-web's message, never a body sent. */
+async function request(environment, fetcher, method, path, body) {
+  const url = `${baseUrl(environment)}${path}`;
+  const response = await fetcher(url, {
+    method,
+    headers: { accept: "application/json", ...(body === undefined ? {} : { "content-type": "application/json" }), ...accessHeaders(environment) },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    redirect: "manual",
+  });
+  const text = await response.text();
+  let result = null;
+  try { result = text ? JSON.parse(text) : null; } catch { /* below */ }
+  if (!response.ok) {
+    const access = response.status >= 300 && response.status < 400 ? " (Access sign-in: check the service token)" : "";
+    throw new Error(`${method} ${path}: HTTP ${response.status}${access}${result?.error ? `: ${result.error}` : ""}`);
+  }
+  return result;
+}
+
+/** The preset's secrets (`ENV → secret name`) whose values the env file has, and the names it lacks. */
+export function secretsFromEnv(preset, values) {
+  const found = [];
+  const missing = [];
+  for (const [envName, secretName] of Object.entries(preset?.secrets ?? {})) {
+    if (typeof values[envName] === "string" && values[envName] !== "") found.push({ envName, secretName, value: values[envName] });
+    else missing.push(envName);
+  }
+  return { found, missing };
+}
+
+async function uploadFromEnv(file, presetName, labels, { environment, fetcher, stdout }) {
+  const preset = await readPreset(presetName);
+  if (!preset?.secrets || !Object.keys(preset.secrets).length) throw new Error("The preset names no secrets");
+  const { found, missing } = secretsFromEnv(preset, await readEnvFile(file));
+  if (missing.length) throw new Error(`${file} has no value for ${missing.join(", ")}; nothing was uploaded`);
+  for (const { envName, secretName, value } of found) {
+    const result = await request(environment, fetcher, "PUT", `/v1/secrets/${encodeURIComponent(secretName)}`,
+      { value, ...(labels ? { allowedLabels: labels } : {}) });
+    const allowed = Object.entries(result?.allowedLabels ?? {}).map(([key, item]) => `${key}=${item}`).join(", ");
+    stdout.write(`set ${secretName} (from ${envName})${result?.hint ? ` ${result.hint}` : ""}${allowed ? `, for machines with ${allowed}` : ""}\n`);
+  }
+  return found.map(({ secretName }) => secretName);
+}
+
+async function readValue(stdin) {
+  let text = "";
+  for await (const chunk of stdin) text += chunk;
+  return text.replace(/\r?\n$/, "");
+}
+
+async function secretsCommand(options, { environment, fetcher, stdout, stdin }) {
+  const [action, name, ...extra] = options.positionals;
+  if (action === "list" && !name) {
+    const result = await request(environment, fetcher, "GET", "/v1/secrets");
+    if (options.json) {
+      stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      return result;
+    }
+    stdout.write(`Vault: ${result.vault.configured ? `key ${result.vault.keyId}` : `not configured${result.vault.error ? ` (${result.vault.error})` : ""}`}\n`);
+    for (const secret of result.secrets) {
+      const labels = Object.entries(secret.allowedLabels).map(([key, value]) => `${key}=${value}`).join(",");
+      stdout.write(`  ${secret.name}${secret.hint ? ` ${secret.hint}` : ""}${labels ? ` [${labels}]` : ""}${secret.staleKey ? " (sealed under an older key)" : ""} · used by ${secret.usedBy.join(", ") || "no job"} · ${secret.updatedAt} by ${secret.updatedBy}\n`);
+    }
+    for (const secret of result.missing) stdout.write(`  ${secret.name} NOT SET · needed by ${secret.usedBy.join(", ")}\n`);
+    return result;
+  }
+  if (action === "put" && name && !extra.length) {
+    if (!stdin || stdin.isTTY) throw new Error("secrets put reads the value from stdin: printf '%s' \"$VALUE\" | home-compute cloud secrets put NAME");
+    const value = await readValue(stdin);
+    if (!value) throw new Error("No value on stdin");
+    const result = await request(environment, fetcher, "PUT", `/v1/secrets/${encodeURIComponent(name)}`,
+      { value, ...(options.labels ? { allowedLabels: options.labels } : {}) });
+    stdout.write(`set ${result.name}${result.hint ? ` ${result.hint}` : ""} (vault key ${result.keyId})\n`);
+    return result;
+  }
+  if (action === "put-env" && name && !extra.length) {
+    if (!options.preset) throw new Error("secrets put-env needs --preset (which env names map to which secrets)");
+    return uploadFromEnv(name, options.preset, options.labels, { environment, fetcher, stdout });
+  }
+  if (action === "delete" && name && !extra.length) {
+    const result = await request(environment, fetcher, "DELETE", `/v1/secrets/${encodeURIComponent(name)}`);
+    stdout.write(`deleted ${result.name}\n`);
+    return result;
+  }
+  throw new Error(`Unknown secrets command\n\n${CLOUD_HELP}`);
+}
+
 /** `home-compute cloud SUBCOMMAND …`. */
-export async function cloudCommand(argv, { environment = process.env, fetcher = fetch, stdout = process.stdout } = {}) {
+export async function cloudCommand(argv, { environment = process.env, fetcher = fetch, stdout = process.stdout, stdin = process.stdin } = {}) {
   const [subcommand, ...rest] = argv;
   const options = parseCloudArgs(rest);
   if (!subcommand || options.help || subcommand === "help") {
     stdout.write(CLOUD_HELP);
     return undefined;
   }
-  if (subcommand === "import") return importCommand(options, { environment, fetcher, stdout });
+  if (subcommand === "import") {
+    if (options.uploadSecrets && (!options.envFile || !options.preset)) throw new Error("--upload-secrets needs --env-file and --preset");
+    const result = await importCommand(options, { environment, fetcher, stdout });
+    if (options.uploadSecrets && !options.dryRun) await uploadFromEnv(options.envFile, options.preset, options.labels, { environment, fetcher, stdout });
+    return result;
+  }
+  if (subcommand === "secrets") return secretsCommand(options, { environment, fetcher, stdout, stdin });
+  if (subcommand === "alert-test") {
+    const result = await request(environment, fetcher, "POST", "/v1/alerts/test", {});
+    stdout.write(`${result.detail} (${result.id})\n`);
+    return result;
+  }
   throw new Error(`Unknown cloud command ${subcommand}\n\n${CLOUD_HELP}`);
 }

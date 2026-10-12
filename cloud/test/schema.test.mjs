@@ -16,13 +16,13 @@ describe("migrations", () => {
       VALUES ('a', 'x', '{}', '{}', ?1, ?1)`).bind(T).run();
   });
 
-  it("create every table and index of the design, plus the changes cursor and machine timeline indexes", async () => {
+  it("create every table and index of the design, plus the changes cursor, machine timeline and alerts", async () => {
     const objects = await rows("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name NOT LIKE 'd1_%' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\' ORDER BY type, name");
     expect(objects.filter((row) => row.type === "table").map((row) => row.name)).toEqual([
-      "audit_log", "jobs", "join_tokens", "machines", "provisioning_tasks", "run_logs", "runs", "schedule_state", "secrets", "settings",
+      "alerts", "audit_log", "jobs", "join_tokens", "machines", "provisioning_tasks", "run_logs", "runs", "schedule_state", "secrets", "settings",
     ]);
     expect(objects.filter((row) => row.type === "index").map((row) => row.name)).toEqual([
-      "audit_at", "runs_by_job", "runs_by_machine", "runs_by_machine_claimed", "runs_by_state", "runs_by_updated", "runs_one_active", "runs_one_due", "runs_slot",
+      "alerts_by_opened", "alerts_open", "audit_at", "runs_by_job", "runs_by_machine", "runs_by_machine_claimed", "runs_by_state", "runs_by_updated", "runs_one_active", "runs_one_due", "runs_slot",
     ]);
   });
 

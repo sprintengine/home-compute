@@ -570,6 +570,40 @@ export function parseRoute(hash) {
   if (parts[0] === "run" && parts[1]) return { page: "run", id: parts[1] };
   if (parts[0] === "machine" && parts[1]) return { page: "machine", id: parts[1] };
   if (parts[0] === "machines" && parts[1] === "add") return { page: "add-machine" };
-  if (["machines", "timetable", "settings", "audit"].includes(parts[0])) return { page: parts[0] };
+  if (["machines", "timetable", "settings", "audit", "secrets"].includes(parts[0])) return { page: parts[0] };
   return { page: "overview" };
+}
+
+// ---------- Alerts (what the owner is emailed about), shown on every page
+
+/**
+ * The strip at the top of every page: the control plane's own cron not
+ * ticking (slots are not being created), alert email failing, and every
+ * open alert, most serious first. `{tone, title, detail, href?}` each.
+ */
+export function alertBanners(snapshot, now = Date.now()) {
+  if (!snapshot || snapshot.controller?.kind !== "hosted") return [];
+  const items = [];
+  const cron = snapshot.controller?.cron;
+  if (cron?.stale) {
+    items.push({
+      kind: "cron", tone: "critical", title: "The control plane's cron is not ticking",
+      detail: cron.lastTickAt ? `last tick ${relative(cron.lastTickAt, now)}; no slots are being created` : "it has never ticked; no slots are being created",
+    });
+  }
+  const email = snapshot.alerts?.email;
+  if (email && email.ok === false) {
+    items.push({ kind: "email", tone: "warning", title: "Alert emails are not being delivered", detail: email.error ?? "", href: "#/settings" });
+  }
+  const KIND_TONE = { "job-failing": "critical", stale: "critical", "no-machine": "critical", waiting: "warning", test: "info" };
+  for (const alert of snapshot.alerts?.open ?? []) {
+    const job = alert.kind === "job-failing" || alert.kind === "waiting" ? alert.target : alert.kind === "stale" ? alert.detail?.job : null;
+    items.push({
+      kind: alert.kind, tone: KIND_TONE[alert.kind] ?? "warning", title: alert.summary,
+      detail: `since ${relative(alert.openedAt, now)}${alert.emailed ? " · emailed" : ""}`,
+      href: alert.kind === "no-machine" ? "#/machines" : job ? jobHref(job) : undefined,
+    });
+  }
+  const order = { critical: 0, warning: 1, info: 2 };
+  return items.sort((a, b) => order[a.tone] - order[b.tone]);
 }

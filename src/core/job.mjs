@@ -59,6 +59,36 @@ export function validateReport(report, description) {
   if (report.format !== "json-lines") throw new Error(`${description}.format must be json-lines`);
   if (report.trackEvent !== undefined) assertString(report.trackEvent, `${description}.trackEvent`);
   if (report.trackBy !== undefined) assertString(report.trackBy, `${description}.trackBy`);
+  if (report.freshness !== undefined && report.freshness !== null) normaliseFreshness(report.freshness, `${description}.freshness`);
+}
+
+const TRACKED_VALUE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/;
+
+/**
+ * How fresh a job's published output must stay (the stale-output alert):
+ * `{"<trackBy value>": {maxAgeHours, url?}}`. The age is that of the newest
+ * `run` the job published (a `YYYYMMDDHH` hour or an ISO time), or, with
+ * `url`, of the `run` in the JSON document there (a published pointer, which
+ * shows the output whichever system produced it). Sorted by value.
+ */
+export function normaliseFreshness(freshness, description = "report.freshness") {
+  if (!freshness || typeof freshness !== "object" || Array.isArray(freshness)) throw new Error(`${description} must be an object`);
+  const result = {};
+  for (const [value, entry] of Object.entries(freshness).sort(([a], [b]) => a.localeCompare(b))) {
+    if (!TRACKED_VALUE.test(value)) throw new Error(`${description}: invalid tracked value ${JSON.stringify(value)}`);
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error(`${description}.${value} must be an object`);
+    const unknown = Object.keys(entry).filter((key) => !["maxAgeHours", "url"].includes(key));
+    if (unknown.length) throw new Error(`${description}.${value}: unknown field ${unknown.join(", ")}`);
+    const hours = entry.maxAgeHours;
+    if (typeof hours !== "number" || !Number.isFinite(hours) || hours <= 0 || hours > 24 * 90) {
+      throw new Error(`${description}.${value}.maxAgeHours must be a number of hours above 0 and at most 2160`);
+    }
+    if (entry.url !== undefined && (typeof entry.url !== "string" || !/^https:\/\/[^\s/]+\/\S*$/.test(entry.url) || entry.url.length > 500)) {
+      throw new Error(`${description}.${value}.url must be an https:// URL`);
+    }
+    result[value] = { maxAgeHours: hours, ...(entry.url ? { url: entry.url } : {}) };
+  }
+  return result;
 }
 
 /** The names of the environment variables a v1 job is given, optional ones first. */
@@ -216,7 +246,7 @@ function normalisePolicy(policy) {
 /** The fields of a definition, in the order they are stored and compared. */
 export const JOB_FIELDS = [
   "description", "enabled", "image", "entrypoint", "args", "env", "secretEnv", "resources", "timeouts",
-  "schedule", "placement", "policy", "report", "network", "labels",
+  "schedule", "placement", "policy", "report", "network", "labels", "registryAuth",
 ];
 
 /**
@@ -239,10 +269,12 @@ export function normaliseJob(input) {
   const secretEnv = normaliseSecretEnv(input.secretEnv, "secretEnv");
   const both = Object.keys(env).filter((name) => name in secretEnv);
   if (both.length) throw new Error(`${both.join(", ")} cannot be both env and secretEnv`);
+  const freshness = input.report?.freshness ? normaliseFreshness(input.report.freshness) : {};
   const report = input.report ? {
     format: "json-lines",
     ...(input.report.trackEvent ? { trackEvent: input.report.trackEvent } : {}),
     ...(input.report.trackBy ? { trackBy: input.report.trackBy } : {}),
+    ...(Object.keys(freshness).length ? { freshness } : {}),
   } : null;
   return {
     id,
@@ -261,7 +293,16 @@ export function normaliseJob(input) {
     report,
     network: oneOf(input.network, NETWORKS, "network", "bridge"),
     labels: normaliseLabels(input.labels, "labels"),
+    registryAuth: normaliseRegistryAuth(input.registryAuth),
   };
+}
+
+/** A private registry's credential: `"vault:<secret>"` (its value `{server, username, password}`), or null. */
+function normaliseRegistryAuth(reference) {
+  if (reference === undefined || reference === null) return null;
+  const match = typeof reference === "string" && reference.match(/^vault:(.+)$/);
+  if (!match || !SECRET_NAME.test(match[1])) throw new Error('registryAuth must be "vault:<secret-name>" or null');
+  return reference;
 }
 
 /** The fields whose values differ between two normalised definitions, with both values; every field for a new job. */

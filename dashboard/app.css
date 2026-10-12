@@ -552,3 +552,15 @@ pre.commands {
 .page > .card + .card, .page > .card + form.card, .page > form.card + .card { margin-top: 10px; }
 td.change details summary { cursor: pointer; }
 td.change pre.detail { max-height: 50vh; }
+
+/* Alerts: on every page, above everything else. */
+.alert-strip { display: grid; gap: 6px; margin: 4px 0 10px; }
+.alert-item { display: block; border-radius: var(--radius); padding: 9px 12px; font-size: 14px; text-decoration: none;
+  border: 1px solid var(--critical); background: var(--critical-bg); color: var(--critical-text); }
+.alert-item.warning { border-color: var(--warning); background: var(--warning-bg); color: var(--text); }
+.alert-item.info { border-color: var(--running); background: var(--running-bg); color: var(--text); }
+.alert-item .detail { font-weight: 400; color: var(--text); }
+a.alert-item:hover strong { text-decoration: underline; }
+
+.secret-form .field input[type="password"] { font-family: var(--mono, ui-monospace, monospace); }
+.secrets td.labels, .secrets td.used { font-size: 13px; }

@@ -20,6 +20,7 @@ export const state = {
   machineRuns: new Map(), // machine id → {data, error}
   settings: null,
   audit: null, // {entries, next, loading, done}
+  secrets: null, // {data, error}: GET /v1/secrets (names, hints and labels; never values)
   joinToken: null, // the last join token made, shown once, then forgotten
   editing: null, // {kind, id, ...draft}
   busy: new Set(),

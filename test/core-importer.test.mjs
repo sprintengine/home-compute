@@ -23,6 +23,10 @@ test("the Wingfoil preset is valid and holds references, not secrets", async () 
   assert.throws(() => validatePreset({ id: "x", secrets: { A: "Not A Name" } }), /secret name/);
   assert.throws(() => validatePreset({ id: "x", secrets: { A: "a" }, env: { A: "1" } }), /both/);
   assert.throws(() => validatePreset({ id: "x", extra: 1 }), /Unknown preset field/);
+  assert.throws(() => validatePreset({ id: "x", freshness: { outputs: { a: { maxAgeHours: 3, pointer: "a.json" } } } }), /needs baseUrl/);
+  assert.throws(() => validatePreset({ id: "x", freshness: { baseUrl: "http://x/", outputs: {} } }), /baseUrl must be an https/);
+  assert.throws(() => validatePreset({ id: "x", freshness: { baseUrl: "https://x/", outputs: { a: { maxAgeHours: 0 } } } }), /maxAgeHours/);
+  assert.throws(() => validatePreset({ id: "x", freshness: { baseUrl: "https://x/", outputs: { a: { maxAgeHours: 1, pointer: "../a" } } } }), /relative path/);
 });
 
 test("every Wingfoil job imports with its timetable, resources, timeouts and env", async () => {
@@ -45,7 +49,10 @@ test("every Wingfoil job imports with its timetable, resources, timeouts and env
     assert.equal(job.resources.diskMiB, parseMiB(v1.task.resources.disk));
     assert.equal(job.timeouts.runSeconds, v1.task.timeouts.totalSeconds - v1.task.timeouts.queueSeconds);
     assert.equal(job.timeouts.maxLatenessSeconds, null, "catch-up latest never expires a run");
-    assert.deepEqual(job.report, v1.task.report ?? null);
+    const { freshness, ...report } = job.report ?? {};
+    assert.deepEqual(job.report ? report : null, v1.task.report ?? null);
+    // The stale-output alert: each model's limit and published pointer, from the preset by the job's `models` label.
+    if (job.report) assert.deepEqual(Object.keys(freshness), [v1.labels.models], v1.id);
     assert.deepEqual(job.labels, v1.labels);
     assert.deepEqual(job.placement, { preferMachines: ["mac-mini"], preferWaitSeconds: 300 });
     assert.deepEqual([job.policy.overlap, job.policy.catchUp, job.policy.retry.onLostRunning], ["coalesce", "latest", true]);
@@ -62,6 +69,8 @@ test("every Wingfoil job imports with its timetable, resources, timeouts and env
   assert.deepEqual(byId.prune.resources, { cpus: 0.5, memoryMiB: 512, diskMiB: 1024 });
   assert.equal(byId.prune.env.FORCE5_SIDECARS, undefined, "prune never asked for it");
   assert.equal(byId.prune.report, null);
+  assert.deepEqual(byId.gfs.report.freshness, { gfs: { maxAgeHours: 12, url: "https://data.wingfoil.ie/weather/gfs.json" } });
+  assert.deepEqual(byId["icon-eu"].report.freshness, { "icon-eu": { maxAgeHours: 30, url: "https://data.wingfoil.ie/weather/latest.json" } });
   assert.equal(byId["harmonie-eps"].schedule.at.hours, undefined, "hourly stays hourly");
   assert.deepEqual(imported.filter(({ job }) => !job.enabled).map(({ job }) => job.id),
     ["harmonie-eps", "ecmwf-ens", "aifs", "gefs", "arpege", "arome", "ecmwf-wave"]);

@@ -9,16 +9,19 @@ import {
 } from "./access.mjs";
 import * as api from "./api.mjs";
 import * as fleet from "./fleet-api.mjs";
+import * as vault from "./secrets.mjs";
+import { alertState, testAlertStatements } from "./alerts.mjs";
 import { readSettings } from "./db.mjs";
 import { errorResponse, HttpError, iso, json, readJson } from "./http.mjs";
 
 const JOB = "([a-z0-9][a-z0-9-]{0,62})";
 const RUN = "(r_[0-9A-Za-z]{26})";
 const MACHINE = "(m_[0-9A-Za-z]{26})";
+const SECRET = "([a-z0-9][a-z0-9._-]{0,62})";
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /** [method, path pattern, role needed, handler]. Mutating routes are everything but GET. */
-const ROUTES = [
+export const ROUTES = [
   ["GET", "/v1/snapshot", "viewer", api.snapshot],
   ["GET", "/v1/changes", "viewer", api.changes],
   ["GET", `/v1/jobs/${JOB}`, "viewer", api.getJob],
@@ -50,6 +53,17 @@ const ROUTES = [
   ["GET", "/v1/settings", "admin", api.getSettings],
   ["PATCH", "/v1/settings", "admin", async (context) => api.patchSettings(context, await readJson(context.request, { maxBytes: 16 * 1024 }))],
   ["GET", "/v1/audit", "admin", api.audit],
+  // The vault (§5): names, hints and labels only; values go in and never come out.
+  ["GET", "/v1/secrets", "admin", vault.listSecrets],
+  ["PUT", `/v1/secrets/${SECRET}`, "admin", vault.putSecret],
+  ["DELETE", `/v1/secrets/${SECRET}`, "admin", vault.deleteSecret],
+  ["GET", "/v1/alerts", "viewer", async ({ db, now }) => json(200, await alertState(db, now, { resolvedSince: now - 7 * 86_400_000 }))],
+  ["POST", "/v1/alerts/test", "admin", async ({ db, identity, ip, now }) => {
+    const { id, statements } = testAlertStatements(db, { now, actor: identity.actor });
+    await db.batch([...statements, db.prepare("INSERT INTO audit_log (at, actor, action, target, ip) VALUES (?, ?, 'alert.test', ?, ?)")
+      .bind(now, identity.actor, id, ip)]);
+    return json(202, { id, detail: "The control plane's next cron minute emails it, then resolves it." });
+  }],
   ["POST", "/v1/import", "admin", api.importHandler],
 ].map(([method, path, role, handler]) => ({ method, pattern: new RegExp(`^${path}$`), role, handler }));
 

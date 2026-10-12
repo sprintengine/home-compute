@@ -9,7 +9,7 @@
 // stops while the page is hidden. The local controller has no cursor, so
 // there it listens to /v1/events and polls the snapshot as before.
 
-import { parseRoute } from "./lib.js";
+import { alertBanners, parseRoute } from "./lib.js";
 import {
   api, append, banner, can, clockNow, h, hasFeature, hosted, setRenderer, setSignedOutHandler, state, toast,
 } from "./ui.js";
@@ -19,7 +19,7 @@ import { jobPage } from "./job.js";
 import { applyBarWidths, runPage } from "./run.js";
 import { addMachinePage, machinePage, machinesPage } from "./machines.js";
 import { timetablePage } from "./timetable.js";
-import { auditPage, settingsPage } from "./admin.js";
+import { auditPage, secretsPage, settingsPage } from "./admin.js";
 
 const CHANGES_EVERY_MS = 10_000;
 const LEGACY_POLL_MS = 15_000;
@@ -38,7 +38,7 @@ let signedOut = null;
 
 const TITLES = {
   overview: "Overview", job: "Job", run: "Run", machines: "Machines", machine: "Machine", "add-machine": "Add machine",
-  timetable: "Timetable", settings: "Settings", audit: "Audit log",
+  timetable: "Timetable", settings: "Settings", audit: "Audit log", secrets: "Secrets",
 };
 
 const NAV = [
@@ -47,7 +47,7 @@ const NAV = [
   { page: "machines", href: "#/machines", label: "Machines", icon: "▣", hosted: true },
   { page: "settings", href: "#/settings", label: "Settings", icon: "⚙" },
 ];
-const SECTION_OF = { job: "overview", run: "overview", machine: "machines", "add-machine": "machines", audit: "settings" };
+const SECTION_OF = { job: "overview", run: "overview", machine: "machines", "add-machine": "machines", audit: "settings", secrets: "settings" };
 
 function renderNav(route) {
   const current = SECTION_OF[route.page] ?? route.page;
@@ -85,8 +85,18 @@ function view(route) {
     case "timetable": return timetablePage();
     case "settings": return settingsPage();
     case "audit": return auditPage();
+    case "secrets": return secretsPage();
     default: return overview();
   }
+}
+
+/** What the owner is emailed about, at the top of every page: nobody has to open the overview to see it. */
+function alertStrip() {
+  const items = alertBanners(state.snapshot);
+  if (!items.length) return "";
+  return h("div", { class: "alert-strip", role: "region", "aria-label": `${items.length} alert${items.length === 1 ? "" : "s"}` },
+    items.map((item) => h(item.href ? "a" : "div", { class: `alert-item ${item.tone}`, ...(item.href ? { href: item.href } : {}), "data-kind": item.kind },
+      h("strong", {}, item.title), item.detail ? h("span", { class: "detail" }, ` · ${item.detail}`) : null)));
 }
 
 function editable(element) {
@@ -108,7 +118,7 @@ function render() {
   const active = document.activeElement;
   const focusId = main.contains(active) ? active.id : null;
   const selection = editable(active) && typeof active.selectionStart === "number" ? [active.selectionStart, active.selectionEnd] : null;
-  main.replaceChildren(view(route));
+  main.replaceChildren(alertStrip(), view(route));
   applyBarWidths(main);
   window.scrollTo(0, scroll);
   const log = main.querySelector(".log");
