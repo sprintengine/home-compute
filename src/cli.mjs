@@ -6,6 +6,7 @@ import process from "node:process";
 import { BacalhauClient, buildJobSpec } from "./bacalhau.mjs";
 import { createApiServer } from "./api.mjs";
 import { cloudCommand } from "./cloud-cli.mjs";
+import { stampConsole } from "./log.mjs";
 import { dashboardSettings, loadConfig, parseDuration, readEnvFile } from "./config.mjs";
 import { readState } from "./scheduler.mjs";
 import { HomeComputeService } from "./service.mjs";
@@ -241,6 +242,8 @@ async function main() {
     } else if (options.command === "run") {
       await runNow(context);
     } else if (options.command === "daemon") {
+      // controller.log is this process's output: every event in it says when it happened.
+      stampConsole();
       await daemon(context);
     } else if (options.command === "doctor") {
       await doctor(context);
