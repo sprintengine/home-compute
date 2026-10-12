@@ -1,0 +1,37 @@
+#!/bin/bash
+# A stand-in for the docker CLI in the agent's unit tests (the pattern of
+# macos/dev/fake-setup.sh). It keeps no state itself: it sends its argv, its
+# environment and, for `login`, its stdin to the fake Docker engine listening
+# on $DOCKER_HOST (test/fake-docker.mjs), which plays Docker, and prints what
+# that answers. So a test sees exactly what the agent ran, and in which
+# environment (a secret must arrive there, never in argv).
+set -u
+sock="${DOCKER_HOST#unix://}"
+if [ "${1:-}" = logs ]; then
+  # docker logs -f --timestamps [--since T] ID: streamed as the engine writes it.
+  since=""
+  id=""
+  shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --since) since="$2"; shift ;;
+      -*) ;;
+      *) id="$1" ;;
+    esac
+    shift
+  done
+  exec curl -sS -N --unix-socket "$sock" "http://fake/fake/logs/$id?since=$since"
+fi
+headers="$(mktemp "${TMPDIR:-/tmp}/fake-docker.XXXXXX")"
+trap 'rm -f "$headers"' EXIT
+{
+  printf '%s\0' "$@"
+  printf '\0'
+  env -0
+  printf '\0'
+  if [ "${1:-}" = login ]; then cat; fi
+} | curl -sS --unix-socket "$sock" -D "$headers" -H 'content-type: application/octet-stream' --data-binary @- http://fake/fake/cli || exit 125
+code="$(tr -d '\r' < "$headers" | awk -F': ' 'tolower($1) == "x-exit-code" { print $2 }' | tail -1)"
+error="$(tr -d '\r' < "$headers" | awk -F': ' 'tolower($1) == "x-stderr" { print $2 }' | tail -1)"
+if [ -n "$error" ]; then printf '%s\n' "$(printf '%s' "$error" | base64 --decode)" >&2; fi
+exit "${code:-0}"

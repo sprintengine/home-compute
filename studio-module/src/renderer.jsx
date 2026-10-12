@@ -30,6 +30,15 @@ function useModuleConfig(host) {
   );
 }
 
+function scheduleLabel(schedule) {
+  if (schedule?.every) return `Every ${schedule.every}`;
+  const at = schedule?.at;
+  if (!at) return "";
+  const minutes = (at.minutes ?? [0]).map((minute) => String(minute).padStart(2, "0"));
+  if (!at.hours) return `Hourly at :${minutes.join(", :")} UTC`;
+  return `${at.hours.flatMap((hour) => minutes.map((minute) => `${String(hour).padStart(2, "0")}:${minute}`)).join(", ")} UTC`;
+}
+
 function relativeTime(value) {
   if (!value) return "Never";
   const seconds = Math.round((new Date(value).getTime() - Date.now()) / 1000);
@@ -110,7 +119,7 @@ function Dashboard({ host }) {
         {snapshot.jobs.map((job) => {
           const state = jobState(job);
           const pauseAction = job.paused ? "resume" : "pause";
-          return <tr key={job.id}><td><div className="hc-job"><StatusDot tone={state.tone} pulse={state.pulse}/><div><div className="hc-job-name">{job.id}</div><div className="hc-subtle">{job.image}</div></div></div></td><td><div className="hc-state">{state.label}</div></td><td className="hc-code">Every {job.schedule.every}</td><td>{relativeTime(job.lastSubmittedAt)}</td><td><div className="hc-actions"><GhostButton size="xs" busy={busy === `${job.id}:run`} disabled={Boolean(job.activeJobId)} onClick={() => operate(job, "run")}>Run now</GhostButton><GhostButton size="xs" busy={busy === `${job.id}:${pauseAction}`} onClick={() => operate(job, pauseAction)}>{job.paused ? "Resume" : "Pause"}</GhostButton></div></td></tr>;
+          return <tr key={job.id}><td><div className="hc-job"><StatusDot tone={state.tone} pulse={state.pulse}/><div><div className="hc-job-name">{job.id}</div><div className="hc-subtle">{job.image}</div></div></div></td><td><div className="hc-state">{state.label}</div></td><td className="hc-code">{scheduleLabel(job.schedule)}</td><td>{relativeTime(job.lastSubmittedAt)}</td><td><div className="hc-actions"><GhostButton size="xs" busy={busy === `${job.id}:run`} disabled={Boolean(job.activeJobId)} onClick={() => operate(job, "run")}>Run now</GhostButton><GhostButton size="xs" busy={busy === `${job.id}:${pauseAction}`} onClick={() => operate(job, pauseAction)}>{job.paused ? "Resume" : "Pause"}</GhostButton></div></td></tr>;
         })}
       </tbody></table></div>
     </Section>

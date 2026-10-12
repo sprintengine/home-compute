@@ -1,0 +1,19 @@
+{
+  "$comment": "What Wingfoil's generated home-compute.json cannot say: see docs/hosted-control-plane.md §8. Secret values live in the control plane's vault, never here.",
+  "id": "wingfoil",
+  "secrets": {
+    "S3_BUCKET": "wingfoil-r2-bucket",
+    "S3_ENDPOINT_URL": "wingfoil-r2-endpoint",
+    "AWS_ACCESS_KEY_ID": "wingfoil-r2-key-id",
+    "AWS_SECRET_ACCESS_KEY": "wingfoil-r2-secret"
+  },
+  "env": { "AWS_REGION": "auto", "FORCE5_SIDECARS": "0", "ECMWF_SOURCE": "ecmwf" },
+  "placement": { "preferMachines": ["mac-mini"], "preferWaitSeconds": 300 },
+  "policy": {
+    "overlap": "coalesce",
+    "catchUp": "latest",
+    "retry": { "maxAttempts": 3, "onLostRunning": true, "onFailed": 0 }
+  },
+  "network": "bridge",
+  "variables": { "WINGFOIL_IMAGE": "ghcr.io/sprintengine/wingfoil-forecast:production" }
+}

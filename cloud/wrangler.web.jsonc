@@ -1,0 +1,31 @@
+// hc-web: the dashboard and the human API, behind a Cloudflare Access application.
+// See README.md for local development and the deploy steps.
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "hc-web",
+  "main": "src/hc-web.mjs",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  // The dashboard folder is served as it is. Requests that match no file
+  // (/v1/*, and /assets/*, which the page asks for) reach the Worker.
+  "assets": { "directory": "../dashboard", "binding": "ASSETS" },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "home-compute",
+      // Replace with the id `wrangler d1 create home-compute` prints. Local dev ignores it.
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    // The Access team, as in https://<team>.cloudflareaccess.com, and the application's AUD tag.
+    "ACCESS_TEAM_DOMAIN": "",
+    "ACCESS_AUD": "",
+    // Comma-separated emails that are admins before any `roles` setting exists.
+    "BOOTSTRAP_ADMINS": "",
+    // hc-core's URL, shown in the enrol command that comes with a join token.
+    "CORE_URL": ""
+  }
+  // Secret: CSRF_KEY (wrangler secret put CSRF_KEY -c wrangler.web.jsonc). Locally: .dev.vars.
+}

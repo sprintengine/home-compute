@@ -7,6 +7,8 @@
     "port": 4786,
     "tokenEnv": "HOME_COMPUTE_API_TOKEN"
   },
+  "history": { "keep": 50 },
+  "dashboard": { "allowedLoginsEnv": "HOME_COMPUTE_DASHBOARD_LOGINS" },
   "bacalhau": {
     "binary": "bacalhau",
     "apiHost": "127.0.0.1",

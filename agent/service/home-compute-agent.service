@@ -1,0 +1,38 @@
+# The Home Compute agent as a systemd service (§4.7 of docs/hosted-control-plane.md).
+# A template: the installer (M6) puts it in /etc/systemd/system/ as is; by hand,
+# copy it there with home-compute.slice, then
+#   systemctl daemon-reload && systemctl enable --now home-compute-agent
+#
+# The agent runs as `hcagent`, a member of the `docker` group (which is
+# root-equivalent: rootless Docker is the cautious alternative, see
+# agent/README.md), at Nice=10. Its containers are not in this unit's cgroup:
+# Docker starts them under home-compute.slice (the agent's
+# `docker.cgroupParent`), so stopping or restarting the agent leaves them
+# running and the next start adopts them.
+[Unit]
+Description=Home Compute agent
+Documentation=https://github.com/sprintengine/home-compute/blob/main/agent/README.md
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=hcagent
+Group=hcagent
+SupplementaryGroups=docker
+Environment=HC_AGENT_STATE_DIR=/etc/home-compute
+ExecStart=/opt/home-compute/node/bin/node /opt/home-compute/agent/current/home-compute-agent.mjs run
+Restart=always
+RestartSec=5
+Nice=10
+TimeoutStopSec=30
+# Hardening that leaves the agent what it needs: its state directory, the Docker socket, /tmp.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/etc/home-compute
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

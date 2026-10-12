@@ -1,15 +1,19 @@
-import { execFile as execFileCallback } from "node:child_process";
+import { execFile as execFileCallback, spawn as spawnCallback } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import os from "node:os";
 import path from "node:path";
 import { resolveTemplate } from "./config.mjs";
+import { jobEnvironmentNames } from "./core/job.mjs";
 
 const execFile = promisify(execFileCallback);
 const TERMINAL_STATES = new Set(["Completed", "Failed", "Stopped", "Cancelled", "Canceled"]);
 
+// Moved to src/core/job.mjs (pure modules must not import this file); re-exported for existing callers.
+export { jobEnvironmentNames };
+
 function environmentVariables(job, environment, redact) {
-  const names = [...new Set([...(job.task.passEnv ?? []), ...(job.task.requiredEnv ?? [])])];
+  const names = jobEnvironmentNames(job);
   const required = new Set(job.task.requiredEnv ?? []);
   return names.flatMap((name) => {
     const value = environment[name];
@@ -19,7 +23,17 @@ function environmentVariables(job, environment, redact) {
   });
 }
 
-export function buildJobSpec(job, environment = process.env, { redact = false } = {}) {
+/**
+ * Bacalhau treats a name it already knows as an update to that job, and an
+ * update whose spec has not changed as no work at all, so submitting a
+ * logical job under its own id would run it once and then never again. Each
+ * submission gets its own name; the `home-compute.job` label keeps the link.
+ */
+export function submissionName(job, now = new Date()) {
+  return `${job.id}-${now.toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "z").toLowerCase()}`;
+}
+
+export function buildJobSpec(job, environment = process.env, { redact = false, now = new Date() } = {}) {
   const image = resolveTemplate(job.task.image, environment, `${job.id}.task.image`);
   const task = {
     Name: "main",
@@ -27,6 +41,7 @@ export function buildJobSpec(job, environment = process.env, { redact = false } 
       Type: "docker",
       Params: {
         Image: image,
+        ...(job.task.entrypoint ? { Entrypoint: Array.from(job.task.entrypoint, String) } : {}),
         Parameters: Array.from(job.task.parameters ?? [], String),
         EnvironmentVariables: environmentVariables(job, environment, redact),
       },
@@ -48,7 +63,7 @@ export function buildJobSpec(job, environment = process.env, { redact = false } 
     },
   };
   return {
-    Name: job.id,
+    Name: submissionName(job, now),
     Namespace: job.namespace ?? "home-compute",
     Type: "batch",
     Count: 1,
@@ -62,6 +77,8 @@ function findState(value, depth = 0) {
   if (!value || typeof value !== "object" || depth > 5) return undefined;
   if (typeof value.State === "string") return value.State;
   if (typeof value.state === "string") return value.state;
+  // Bacalhau 1.9 nests it: `"State": {"StateType": "Completed", "Message": ...}`.
+  if (typeof value.State?.StateType === "string") return value.State.StateType;
   for (const key of ["Job", "job", "Result", "result"]) {
     const state = findState(value[key], depth + 1);
     if (state) return state;
@@ -69,12 +86,63 @@ function findState(value, depth = 0) {
   return undefined;
 }
 
+/**
+ * The newest execution's result. Bacalhau calls a batch job Completed when its
+ * container ran to the end, whatever it exited with, so the exit code is the
+ * only place a workload's own failure shows.
+ */
+function latestRun(result) {
+  const executions = Array.isArray(result?.Executions?.Items) ? result.Executions.Items : [];
+  const execution = executions
+    .filter((candidate) => candidate?.RunOutput)
+    .sort((a, b) => (b.JobVersion ?? 0) - (a.JobVersion ?? 0) || (b.ModifyTime ?? 0) - (a.ModifyTime ?? 0))[0];
+  if (!execution) return {};
+  const output = execution.RunOutput;
+  return {
+    executionId: execution.ID,
+    exitCode: Number.isInteger(output.ExitCode) ? output.ExitCode : undefined,
+    stdout: output.Stdout ?? output.stdout ?? "",
+    stderr: output.stderr ?? output.Stderr ?? "",
+    truncated: Boolean(output.StdoutTruncated || output.StderrTruncated),
+    errorMessage: output.ErrorMsg || undefined,
+  };
+}
+
+function isoTime(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  // Bacalhau's own CreateTime/ModifyTime are nanoseconds since the epoch.
+  const time = typeof value === "number" ? value / 1e6 : Date.parse(value);
+  return Number.isFinite(time) && time > 0 ? new Date(time).toISOString() : undefined;
+}
+
+/**
+ * When the run was submitted, began executing and ended, from the job's
+ * history. A run that waited for capacity is Queued between the first two.
+ */
+export function runTiming(result) {
+  const items = Array.isArray(result?.History?.Items) ? result.History.Items : [];
+  const at = (item) => isoTime(item?.Time ?? item?.Event?.Timestamp);
+  const newState = (item) => item?.Event?.Details?.NewState;
+  const submitted = items.find((item) => item?.Event?.Topic === "Submission");
+  const started = items.find((item) => item?.Type === "ExecutionLevel" && item?.Event?.Topic === "Execution"
+      && /^running$/i.test(item?.Event?.Message ?? ""))
+    ?? items.find((item) => newState(item) === "Running");
+  const finished = items.findLast((item) => TERMINAL_STATES.has(newState(item)));
+  const timing = {
+    submittedAt: at(submitted) ?? isoTime(result?.Job?.CreateTime),
+    startedAt: at(started),
+    finishedAt: at(finished),
+  };
+  return Object.fromEntries(Object.entries(timing).filter(([, value]) => value));
+}
+
 export class BacalhauClient {
-  constructor({ binary = "bacalhau", apiHost, apiPort, execute = execFile } = {}) {
+  constructor({ binary = "bacalhau", apiHost, apiPort, execute = execFile, spawn = spawnCallback } = {}) {
     this.binary = binary;
     this.apiHost = apiHost;
     this.apiPort = apiPort;
     this.execute = execute;
+    this.spawn = spawn;
   }
 
   commonArgs() {
@@ -107,7 +175,69 @@ export class BacalhauClient {
     const result = JSON.parse(stdout);
     const state = findState(result);
     if (!state) throw new Error(`Could not determine state of Bacalhau job ${jobId}`);
-    return { state, terminal: TERMINAL_STATES.has(state), raw: result };
+    return { state, terminal: TERMINAL_STATES.has(state), ...latestRun(result), timing: runTiming(result), raw: result };
+  }
+
+  /** The job's whole log, for when describe's copy of the output was truncated. */
+  async logs(jobId) {
+    const { stdout } = await this.execute(this.binary, ["job", "logs", jobId, ...this.commonArgs()], {
+      maxBuffer: 50 * 1024 * 1024,
+    });
+    return stdout;
+  }
+
+  /**
+   * The end of a job's log, never holding more than about twice `maxBytes`
+   * however long the log is. A run still going is read as far as it has got;
+   * `partial` says the read was cut short by `timeoutMs`.
+   */
+  async logTail(jobId, { maxBytes = 256 * 1024, timeoutMs = 20_000 } = {}) {
+    return new Promise((resolve, reject) => {
+      const child = this.spawn(this.binary, ["job", "logs", jobId, ...this.commonArgs()], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let chunks = [];
+      let held = 0;
+      let total = 0;
+      let stderr = "";
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+      }, timeoutMs);
+      child.stdout.on("data", (chunk) => {
+        chunks.push(chunk);
+        held += chunk.length;
+        total += chunk.length;
+        if (held > 2 * maxBytes) {
+          chunks = [Buffer.concat(chunks).subarray(-maxBytes)];
+          held = chunks[0].length;
+        }
+      });
+      child.stderr.on("data", (chunk) => {
+        if (stderr.length < 4096) stderr += chunk.toString("utf8");
+      });
+      child.once("error", (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      child.once("close", (code) => {
+        clearTimeout(timer);
+        if (code !== 0 && !timedOut) {
+          reject(new Error(stderr.trim().split(/\r?\n/).at(-1) || `bacalhau job logs exited with ${code}`));
+          return;
+        }
+        let buffer = Buffer.concat(chunks);
+        const truncated = total > maxBytes;
+        if (truncated) {
+          buffer = buffer.subarray(-maxBytes);
+          // Drop the first, cut line (and any character split by the cut).
+          const newline = buffer.indexOf(10);
+          if (newline >= 0) buffer = buffer.subarray(newline + 1);
+        }
+        resolve({ text: buffer.toString("utf8"), bytes: total, truncated, partial: timedOut });
+      });
+    });
   }
 
   async nodes() {
@@ -118,7 +248,14 @@ export class BacalhauClient {
   }
 
   async version() {
-    const { stdout } = await this.execute(this.binary, ["version"], { maxBuffer: 1024 * 1024 });
-    return stdout.trim();
+    const { stdout } = await this.execute(this.binary, ["version", "--output", "json", ...this.commonArgs()], {
+      maxBuffer: 1024 * 1024,
+    });
+    try {
+      const { clientVersion, serverVersion } = JSON.parse(stdout);
+      return `client ${clientVersion?.GitVersion ?? "unknown"}, server ${serverVersion?.GitVersion ?? "unreachable"}`;
+    } catch {
+      return stdout.trim();
+    }
   }
 }

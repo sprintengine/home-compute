@@ -1,0 +1,9 @@
+#!/bin/bash
+# A stand-in for macOS's caffeinate in the agent's unit tests: it notes its
+# arguments and pid in $FAKE_CAFFEINATE_DIR/started, holds "the assertion"
+# until it is sent SIGTERM, then notes its pid in .../stopped.
+set -u
+dir="${FAKE_CAFFEINATE_DIR:?FAKE_CAFFEINATE_DIR is not set}"
+printf '%s %s\n' "$$" "$*" >> "$dir/started"
+trap 'printf "%s\n" "$$" >> "$dir/stopped"; exit 0' TERM
+while :; do sleep 0.05; done

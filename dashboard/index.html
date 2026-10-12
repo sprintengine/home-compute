@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#f4f4f2" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#111110" media="(prefers-color-scheme: dark)">
+  <meta name="referrer" content="no-referrer">
+  <title>Home Compute</title>
+  <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="stylesheet" href="/assets/app.css">
+  <script type="module" src="/assets/app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="top">
+    <a class="brand" href="#/"><img src="/assets/icon.svg" alt="" width="22" height="22"><span>Home Compute</span></a>
+    <div class="top-status" id="top-status" aria-live="polite"></div>
+  </header>
+  <div class="shell">
+    <nav class="nav" id="nav" aria-label="Pages" hidden></nav>
+    <main id="main" tabindex="-1"><p class="muted center">Loading…</p></main>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+  <noscript><p class="center">The dashboard needs JavaScript.</p></noscript>
+</body>
+</html>

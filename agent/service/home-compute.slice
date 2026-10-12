@@ -1,0 +1,19 @@
+# Where the agent's containers run on Linux (§4.3): a low CPU weight, so the
+# machine's own work comes first, and a memory ceiling for all runs together.
+# Docker puts a container here when the agent's config.json says
+#   "docker": { "cgroupParent": "home-compute.slice" }
+# (Docker's systemd cgroup driver, the default on current distributions).
+#
+# MemoryMax: the machine's memory cap for runs (config.json caps.memoryMiB)
+# plus a little for the containers' own overhead. @MEMORY_MAX@ is filled in
+# by the installer (M6); by hand, write a size such as 6G.
+[Unit]
+Description=Home Compute containers
+Documentation=https://github.com/sprintengine/home-compute/blob/main/agent/README.md
+Before=slices.target
+
+[Slice]
+CPUAccounting=yes
+CPUWeight=20
+MemoryAccounting=yes
+MemoryMax=@MEMORY_MAX@

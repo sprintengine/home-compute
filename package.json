@@ -13,15 +13,18 @@
   "homepage": "https://github.com/sprintengine/home-compute#readme",
   "type": "module",
   "workspaces": [
-    "studio-module"
+    "studio-module",
+    "cloud",
+    "agent"
   ],
   "bin": {
     "home-compute": "./src/cli.mjs"
   },
   "scripts": {
     "build:studio": "npm run build --workspace @home-compute/studio-module",
-    "check": "node --check src/*.mjs && node --test && npm run check --workspace @home-compute/studio-module",
-    "test": "node --test"
+    "check": "node --check src/*.mjs src/core/*.mjs && for file in dashboard/*.js; do node --check \"$file\" || exit 1; done && node --test 'test/*.test.mjs' && npm run check --workspace @home-compute/studio-module && npm run check --workspace @home-compute/agent",
+    "test": "node --test 'test/*.test.mjs'",
+    "build:agent": "npm run build --workspace @home-compute/agent"
   },
   "engines": {
     "node": ">=22"

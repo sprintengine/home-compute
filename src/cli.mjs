@@ -5,7 +5,8 @@ import path from "node:path";
 import process from "node:process";
 import { BacalhauClient, buildJobSpec } from "./bacalhau.mjs";
 import { createApiServer } from "./api.mjs";
-import { loadConfig, parseDuration, readEnvFile } from "./config.mjs";
+import { cloudCommand } from "./cloud-cli.mjs";
+import { dashboardSettings, loadConfig, parseDuration, readEnvFile } from "./config.mjs";
 import { readState } from "./scheduler.mjs";
 import { HomeComputeService } from "./service.mjs";
 
@@ -18,6 +19,7 @@ Usage:
   home-compute daemon [--config FILE] [--env-file FILE] [--state FILE] [--once] [--no-api]
   home-compute status [--config FILE] [--state FILE] [--live]
   home-compute doctor [--config FILE] [--env-file FILE]
+  home-compute cloud import FILE [--preset NAME] [--image REF] [--dry-run]   (see: home-compute cloud help)
 
 Defaults: ./home-compute.json and ./.home-compute/state.json. Secret values come
 from the process environment or an ignored env file. Configuration contains only
@@ -116,16 +118,18 @@ async function runNow({ config, options, environment }) {
 async function daemon({ config, options, environment }) {
   const stateFile = stateFilename(config, options.state);
   const client = clientFor(config);
-  const service = new HomeComputeService({ config, client, environment, stateFile });
   const interval = parseDuration(config.pollEvery ?? "30s");
   const apiConfig = config.api ?? {};
   const token = apiConfig.tokenEnv ? environment[apiConfig.tokenEnv] : undefined;
   if (apiConfig.tokenEnv && !token) throw new Error(`API authentication requires ${apiConfig.tokenEnv}`);
+  const service = new HomeComputeService({ config, client, environment, stateFile, secrets: token ? [token] : [] });
+  const dashboard = dashboardSettings(config, environment);
   const api = options.once || options.noApi || apiConfig.enabled === false ? undefined : createApiServer({
     service,
     host: apiConfig.host ?? "127.0.0.1",
     port: apiConfig.port ?? 4786,
     token,
+    dashboard,
   });
   const release = await acquireLock(stateFile);
   let stopping = false;
@@ -136,10 +140,21 @@ async function daemon({ config, options, environment }) {
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
+  // `kill -HUP` reloads the jobs, as POST /v1/reload does.
+  const reload = () => service.reloadConfig({ reason: "SIGHUP" }).catch((error) => {
+    console.error(JSON.stringify({ event: "config_reload_failed", error: error.message }));
+  });
+  process.on("SIGHUP", reload);
   try {
     if (api) {
       const address = await api.listen();
-      console.log(JSON.stringify({ event: "api_listening", ...address, authenticated: Boolean(token) }));
+      console.log(JSON.stringify({
+        event: "api_listening",
+        ...address,
+        authenticated: Boolean(token),
+        dashboard: dashboard.enabled !== false,
+        tailscaleLogins: dashboard.allowedLogins.length,
+      }));
     }
     do {
       await service.reconcile();
@@ -155,6 +170,7 @@ async function daemon({ config, options, environment }) {
       });
     } while (!stopping);
   } finally {
+    process.off("SIGHUP", reload);
     await api?.close();
     await release();
   }
@@ -202,6 +218,10 @@ async function doctor({ config, environment }) {
 }
 
 async function main() {
+  if (process.argv[2] === "cloud") {
+    await cloudCommand(process.argv.slice(3));
+    return;
+  }
   const options = parseArgs(process.argv.slice(2));
   if (["help", "--help", "-h"].includes(options.command)) {
     console.log(HELP);
