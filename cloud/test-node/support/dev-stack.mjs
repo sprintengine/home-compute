@@ -98,15 +98,17 @@ export async function startDevStack() {
   };
   const webProcess = startWrangler(["dev", "-c", "wrangler.web.jsonc", "--persist-to", state, "--port", String(webPort), "--ip", "127.0.0.1",
     "--inspector-port", String(webInspector), "--log-level", "warn", ...Object.entries(vars).flatMap(([name, value]) => ["--var", `${name}:${value}`])], quiet);
-  const coreProcess = startWrangler(["dev", "-c", "wrangler.core.jsonc", "--persist-to", state, "--port", String(corePort), "--ip", "127.0.0.1",
-    "--inspector-port", String(coreInspector), "--log-level", "warn", "--test-scheduled"], quiet);
+  let coreProcess = null;
   const close = async () => {
-    await Promise.all([stop(webProcess.child), stop(coreProcess.child)]);
+    await Promise.all([stop(webProcess.child), coreProcess ? stop(coreProcess.child) : null]);
     await new Promise((resolve) => certs.close(resolve));
     await rm(state, { recursive: true, force: true });
   };
   try {
     await waitFor(`${web}/v1/health`, webProcess.output);
+    // One at a time: two workerd processes opening the shared local D1 at once can fail to start with SQLITE_BUSY.
+    coreProcess = startWrangler(["dev", "-c", "wrangler.core.jsonc", "--persist-to", state, "--port", String(corePort), "--ip", "127.0.0.1",
+      "--inspector-port", String(coreInspector), "--log-level", "warn", "--test-scheduled"], quiet);
     await waitFor(`${core}/health`, coreProcess.output);
   } catch (error) {
     await close();
