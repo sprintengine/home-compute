@@ -1,11 +1,12 @@
-// The overview (§7.1), in order: what needs attention, what runs now, the
-// next slots and the jobs (schedule in UTC with Irish time beside it, last
+// The overview (§7.1), in order: what runs now and for how long, the next
+// runs in schedule order (the very next one first and largest), what needs
+// attention, and the jobs (schedule in UTC with Irish time beside it, last
 // outcome, published per model, a duration sparkline). Jobs switched off
 // fold into one line.
 
 import {
-  LOCAL_NAME, LOCAL_ZONE, PHASE_LABELS, WAITING_TOO_LONG_MS, attentionItems, clockIn, duration, jobHref, jobState, mib, modelRun, parseTime,
-  peakMiB, phaseOf, relative, runHref, scheduleLine, sparkBars, sparkSummary,
+  LOCAL_NAME, LOCAL_ZONE, PHASE_LABELS, attentionItems, bothClocks, clockIn, duration, jobHref, jobState, mib, modelRun, nextRuns, peakMiB,
+  relative, runHref, runningNow, scheduleLine, sparkBars, sparkSummary,
 } from "./lib.js";
 import {
   api, banner, busy, can, chip, clockNow, emptyState, fullTime, h, hosted, isBusy, outcomeChip, section, state, stateChip, toast, when,
@@ -30,11 +31,10 @@ export function overview() {
       `${shown.length} job${shown.length === 1 ? "" : "s"}`,
       hosted() ? ` · ${machines.length} machine${machines.length === 1 ? "" : "s"} (${online} online)` : ` · ${snapshot.nodeCount ?? 0} nodes`,
       state.updatedAt ? ` · updated ${clockNow(state.updatedAt)}` : ""),
+    section("Running now", running(snapshot, now)),
+    section("Next up", nextUp(nextRuns(snapshot, now), now)),
     section(`Needs attention${items.length ? ` (${items.length})` : ""}`,
       items.length ? h("ul", { class: "list attention", role: "list" }, items.map(attentionRow)) : h("p", { class: "all-clear" }, h("span", { "aria-hidden": "true" }, "✓ "), "Nothing needs a look.")),
-    h("div", { class: "two-up" },
-      section("Running now", runningNow(snapshot, now)),
-      snapshot.upcoming ? section("Next up", nextUp(snapshot.upcoming)) : null),
     section("Jobs",
       h("div", { class: "job-grid" }, shown.length ? shown.map((job) => jobCard(job, now)) : emptyState("No jobs yet. Import some with home-compute cloud import.")),
       off.length ? h("p", { class: "off-line" }, `Off in the timetable (${off.length}): `, off.map((job, index) => [index ? ", " : "", h("a", { href: jobHref(job.id) }, job.id)])) : null));
@@ -66,47 +66,62 @@ function attentionRow(item) {
         item.detail ? h("span", { class: "item-detail" }, item.detail) : null)));
 }
 
-function runningNow(snapshot, now) {
-  const runs = (snapshot.activeRuns ?? []).filter((run) => phaseOf(run) !== "due" || now - (parseTime(run.submittedAt) ?? now) < WAITING_TOO_LONG_MS);
-  if (!runs.length && !hosted()) {
-    const active = (snapshot.jobs ?? []).filter((job) => ["running", "queued"].includes(jobState(job)));
-    if (!active.length) return emptyState("Nothing is running.");
-    return h("ul", { class: "list", role: "list" }, active.map((job) => h("li", {}, h("a", { class: "item", href: jobHref(job.id) },
-      h("span", { class: "item-body" }, h("span", { class: "item-title" }, job.id), h("span", { class: "item-detail" }, `since ${when(job.lastSubmittedAt)}`)), stateChip(job)))));
-  }
-  if (!runs.length) return emptyState("Nothing is running.");
+function running(snapshot, now) {
+  const rows = runningNow(snapshot, now);
+  if (!rows.length) return emptyState("Nothing running.");
   const jobs = new Map((snapshot.jobs ?? []).map((job) => [job.id, job]));
-  return h("ul", { class: "list running", role: "list" }, runs.map((run) => {
-    const phase = phaseOf(run);
-    const since = parseTime(run.startedAt) ?? parseTime(run.claimedAt) ?? parseTime(run.submittedAt);
-    const peak = peakMiB(run);
-    const limit = jobs.get(run.job)?.resources?.memoryMiB;
+  return h("ul", { class: "list running", role: "list" }, rows.map((row) => {
+    const waiting = row.phase === "due";
+    const label = PHASE_LABELS[row.phase] ?? row.phase;
+    const peak = row.run ? peakMiB(row.run) : null;
+    const limit = jobs.get(row.job)?.resources?.memoryMiB;
+    const elapsed = row.seconds === null ? "—" : duration(row.seconds);
+    const detail = waiting ? row.run?.waiting ?? (row.run ? "waiting for a machine" : "queued, waiting for capacity") : [
+      row.run ? `${row.run.machineName ?? "—"} · ` : "",
+      label,
+      peak !== null ? ` · peak ${mib(peak)}${limit ? ` of ${mib(limit)}` : ""}` : "",
+    ];
     return h("li", {},
-      h("a", { class: "item", href: runHref(run.id) },
+      h("a", { class: "item", href: row.run ? runHref(row.id) : jobHref(row.job) },
         h("span", { class: "item-body" },
-          h("span", { class: "item-title" }, run.job),
-          h("span", { class: "item-detail" },
-            phase === "due" ? (run.waiting ?? "waiting for a machine") : [
-              run.machineName ?? "—",
-              ` · ${PHASE_LABELS[phase] ?? phase} ${since ? duration((now - since) / 1000) : ""}`,
-              peak !== null ? ` · peak ${mib(peak)}${limit ? ` of ${mib(limit)}` : ""}` : "",
-            ])),
-        chip({ label: PHASE_LABELS[phase] ?? phase, tone: phase === "due" ? "warning" : "running", icon: phase === "due" ? "◷" : "●" })));
+          h("span", { class: "item-title" }, row.job),
+          h("span", { class: "item-detail" }, detail)),
+        h("span", { class: "elapsed", title: `${waiting ? "Waiting" : label} for ${elapsed}${row.since !== null ? `, since ${when(row.since)}` : ""}` },
+          h("span", { class: "mono" }, elapsed),
+          h("span", { class: "muted small" }, waiting ? "waiting" : "so far")),
+        chip({ label, tone: waiting ? "warning" : "running", icon: waiting ? "◷" : "●" })));
   }));
 }
 
-function nextUp(slots) {
-  if (!slots.length) return emptyState(state.snapshot.controller?.globalPause ? "Paused: no slots will run." : "No scheduled slots.");
-  return h("ol", { class: "list next", role: "list" }, slots.map((slot) => h("li", {},
-    h("a", { class: "item", href: jobHref(slot.job) },
-      h("span", { class: "slot-time" }, h("span", { class: "mono" }, `${clockIn(Date.parse(slot.at))} UTC`),
-        h("span", { class: "muted small" }, relative(slot.at))),
-      h("span", { class: "item-body" },
-        h("span", { class: "item-title" }, slot.job),
-        h("span", { class: "item-detail" }, `${clockIn(Date.parse(slot.at), LOCAL_ZONE)} ${LOCAL_NAME}`)),
-      h("span", { class: `expected${slot.machine ? "" : " none"}`, title: slot.note ?? undefined },
-        slot.machine ? `→ ${slot.machine}` : slot.note?.startsWith("blocked") ? "blocked" : "no machine",
-        slot.machine && slot.note ? h("span", { class: "muted small block" }, slot.note) : null)))));
+/** The next runs, soonest first; the very next one is the large first item. */
+function nextUp(slots, now) {
+  if (!slots.length) return emptyState(state.snapshot.controller?.globalPause ? "Paused: no scheduled runs will start." : "No scheduled runs.");
+  return h("ol", { class: "list next", role: "list" }, slots.map((slot, index) => {
+    // Only the hosted control plane says which machine is expected to take a slot.
+    const expected = "machine" in slot ? h("span", { class: `expected${slot.machine ? "" : " none"}`, title: slot.note ?? undefined },
+      slot.machine ? `→ ${slot.machine}` : slot.note?.startsWith("blocked") ? "blocked" : "no machine",
+      slot.machine && slot.note ? h("span", { class: "muted small block" }, slot.note) : null) : null;
+    if (index === 0) {
+      const why = !slot.machine && slot.note ? slot.note[0].toUpperCase() + slot.note.slice(1) : null;
+      return h("li", { class: "first" },
+        h("a", { class: "item next-first", href: jobHref(slot.job) },
+          h("span", { class: "item-body" },
+            h("span", { class: "next-label" }, "Next run"),
+            h("span", { class: "next-job" }, slot.job),
+            h("span", { class: "item-detail" }, bothClocks(slot.at)),
+            // Next in the schedule but not going to start as things are: say why in full, not in a tooltip.
+            why ? h("span", { class: "next-note" }, why) : null),
+          h("span", { class: "next-in" }, h("time", { class: "next-in-text", datetime: new Date(slot.at).toISOString() }, relative(slot.at, now)), why ? null : expected)));
+    }
+    return h("li", {},
+      h("a", { class: "item", href: jobHref(slot.job) },
+        h("span", { class: "slot-time" }, h("time", { class: "mono", datetime: new Date(slot.at).toISOString() }, `${clockIn(slot.at)} UTC`),
+          h("span", { class: "muted small" }, relative(slot.at, now))),
+        h("span", { class: "item-body" },
+          h("span", { class: "item-title" }, slot.job),
+          h("span", { class: "item-detail" }, `${clockIn(slot.at, LOCAL_ZONE)} ${LOCAL_NAME}`)),
+        expected));
+  }));
 }
 
 export function sparkline(durations, { width = 132, height = 30 } = {}) {

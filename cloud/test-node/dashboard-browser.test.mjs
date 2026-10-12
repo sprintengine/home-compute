@@ -72,8 +72,19 @@ describe("the hosted dashboard in a browser", { skip, timeout: 600_000 }, () => 
 
   for (const viewport of VIEWPORTS) {
     describe(`at ${viewport.width}×${viewport.height}`, () => {
-      it("leads the overview with what needs attention, then what runs and what is next", async () => {
+      it("leads the overview with what runs now, then the next runs soonest first, then what needs attention", async () => {
         const { page, context, problems } = await open(viewport, ADMIN);
+        await page.locator("ol.next").waitFor();
+        const headings = (await page.locator("main section > h2").allTextContents()).map((text) => text.replace(/ \(\d+\)$/, ""));
+        assert.deepEqual(headings, ["Running now", "Next up", "Needs attention", "Jobs"]);
+        const running = page.locator("ul.running > li");
+        assert.match(await running.first().innerText(), /slow[\s\S]*mac-mini · Running · peak 412 MiB of 1 GiB[\s\S]*\b(\d+h \d+m|\d+m \d+s|\d+s)\s+so far/, "slow, the longest-running, first, with how long it has gone");
+        assert.equal(await page.locator("ul.running", { hasText: "gpu-render" }).count(), 0, "a 14-minute wait is in attention, not here");
+        assert.equal(await page.locator("ol.next > li").count(), 6);
+        assert.match(await page.locator("ol.next > li.first").innerText(), /Next run[\s\S]*\d\d:\d\d UTC/i);
+        const times = (await page.locator("ol.next time").evaluateAll((elements) => elements.map((element) => element.getAttribute("datetime")))).map(Date.parse);
+        assert.equal(times.length, 6);
+        assert.deepEqual(times, [...times].sort((a, b) => a - b), "soonest first");
         const attention = page.locator("ul.attention");
         await attention.waitFor();
         const text = await attention.innerText();
@@ -83,8 +94,6 @@ describe("the hosted dashboard in a browser", { skip, timeout: 600_000 }, () => 
         ]) assert.ok(text.includes(expected), `attention shows "${expected}":\n${text}`);
         // Critical items come first.
         assert.ok(text.indexOf("flaky: last run failed") < text.indexOf("gpu-render: waiting"));
-        assert.match(await page.locator("ul.running").innerText(), /slow[\s\S]*mac-mini[\s\S]*peak 412 MiB of 1 GiB/);
-        assert.equal(await page.locator("ol.next > li").count(), 6);
         assert.match(await page.locator(".job-grid").innerText(), /ecmwf[\s\S]*Daily at 08:20, 10:20 UTC/);
         assert.match(await page.locator(".off-line").innerText(), /Off in the timetable \(7\): aifs/);
         assert.ok(await page.locator("svg.spark").count() >= 4, "duration sparklines");
@@ -245,6 +254,27 @@ describe("the hosted dashboard in a browser", { skip, timeout: 600_000 }, () => 
       });
     });
   }
+
+  it("says so when nothing runs and nothing is scheduled, or everything is paused", async () => {
+    const { page, context, problems } = await open(VIEWPORTS[0], ADMIN, "#/timetable");
+    let globalPause = false;
+    await page.route("**/v1/snapshot", async (route) => {
+      const response = await route.fetch();
+      const snapshot = await response.json();
+      await route.fulfill({ response, json: { ...snapshot, activeRuns: [], upcoming: [], controller: { ...snapshot.controller, globalPause } } });
+    });
+    await page.goto(`${stack.web}/#/`);
+    const empty = (name) => page.locator(`section[aria-label="${name}"] > .empty`).innerText();
+    await page.locator("section[aria-label='Running now'] > .empty").waitFor();
+    assert.equal(await empty("Running now"), "Nothing running.");
+    assert.equal(await empty("Next up"), "No scheduled runs.");
+    globalPause = true;
+    await page.reload();
+    await page.locator(".banner.warning").waitFor();
+    assert.equal(await empty("Next up"), "Paused: no scheduled runs will start.");
+    assert.deepEqual(problems, []);
+    await context.close();
+  });
 
   it("signs in as DEV_ACCESS_EMAIL under wrangler dev when no Access token comes", async () => {
     const { page, context } = await open(VIEWPORTS[1], null, "#/settings");

@@ -398,8 +398,17 @@ button.danger-fill { background: var(--critical); border-color: var(--critical);
 .expected.none { color: var(--warning-text); }
 .block { display: block; }
 
-.two-up { display: grid; gap: 0 18px; }
-@media (min-width: 900px) { .two-up { grid-template-columns: 1fr 1fr; } }
+/* The top of the overview: what runs now and for how long, then the next runs, the very next one largest. */
+.list.running .item { border-color: color-mix(in srgb, var(--running) 45%, var(--border)); }
+.elapsed { display: grid; justify-items: end; flex: none; line-height: 1.25; }
+.elapsed .mono { font-size: 15px; font-weight: 650; color: var(--text); }
+.list .item.next-first { padding: 14px 16px; border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); background: var(--running-bg); }
+.next-label { font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.04em; color: var(--accent); }
+.next-job { font-size: 22px; font-weight: 700; line-height: 1.2; overflow-wrap: anywhere; }
+.next-in { display: grid; justify-items: end; gap: 2px; flex: none; max-width: 45%; text-align: right; }
+.next-in-text { font-size: 20px; font-weight: 700; white-space: nowrap; }
+.next-in .expected { max-width: none; }
+.next-note { color: var(--warning-text); font-size: 13px; overflow-wrap: anywhere; }
 
 /* Job cards */
 .job-grid { display: grid; gap: 8px; }
