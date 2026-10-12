@@ -227,4 +227,24 @@ struct ControlModelTests {
         #expect(Fmt.minutes(3300) == "55 min")
         #expect(Fmt.minutes(5400) == "1 h 30 min")
     }
+
+    @Test func schedulerBannerSaysStoppedOnlyWhenLaunchdSaysSo() throws {
+        func state(_ controller: String, _ bacalhau: String, _ colima: String = "running") throws -> SetupState {
+            try decode(SetupState.self, #"{"services": {"controller": {"state": "\#(controller)"}, "bacalhau": {"state": "\#(bacalhau)"}, "colima": {"state": "\#(colima)"}}}"#)
+        }
+        // A busy Mac: the app cannot reach the controller, and the state script's checks timed out.
+        if case .notAnswering = SchedulerBanner.decide(state: try state("unknown", "unknown", "unknown"), unreachable: true) {} else {
+            Issue.record("unknown services must not read as stopped")
+        }
+        if case .notAnswering = SchedulerBanner.decide(state: nil, unreachable: true) {} else {
+            Issue.record("no state yet must not read as stopped")
+        }
+        if case .notAnswering = SchedulerBanner.decide(state: try state("running", "running"), unreachable: true) {} else {
+            Issue.record("running but unreachable from the app is not answering")
+        }
+        #expect(SchedulerBanner.decide(state: try state("stopped", "running"), unreachable: true) == .stopped("Not running: scheduler"))
+        #expect(SchedulerBanner.decide(state: try state("running", "missing"), unreachable: false) == .stopped("Not running: Bacalhau"))
+        #expect(SchedulerBanner.decide(state: try state("running", "running"), unreachable: false) == nil)
+        #expect(SchedulerBanner.decide(state: nil, unreachable: false) == nil)
+    }
 }

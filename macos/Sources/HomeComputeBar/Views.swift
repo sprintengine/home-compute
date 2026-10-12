@@ -178,6 +178,7 @@ struct ServicesCard: View {
         case notSetUp
         case starting
         case stopped(String)
+        case notAnswering(String)
         case unreachableNoScript
     }
 
@@ -203,25 +204,21 @@ struct ServicesCard: View {
             return .run(run)
         }
         guard control.script != nil else { return unreachable ? .unreachableNoScript : nil }
-        guard let state = control.state else { return unreachable ? .stopped("The scheduler isn't answering.") : nil }
-        if !state.isSetUp { return .notSetUp }
-        if state.isStarting { return .starting }
-        if state.isStopped || unreachable {
-            let services = state.services
-            let stopped = [("Colima", services?.colima?.state), ("Bacalhau", services?.bacalhau?.state),
-                           ("scheduler", services?.controller?.state)]
-                .filter { ["stopped", "missing"].contains($0.1?.lowercased() ?? "") }
-                .map(\.0)
-            return .stopped(stopped.isEmpty ? "The scheduler isn't answering."
-                            : "Not running: " + stopped.joined(separator: ", "))
+        if let state = control.state {
+            if !state.isSetUp { return .notSetUp }
+            if state.isStarting && state.stoppedServices.isEmpty { return .starting }
         }
-        return nil
+        switch SchedulerBanner.decide(state: control.state, unreachable: unreachable) {
+        case .stopped(let detail): return .stopped(detail)
+        case .notAnswering(let detail): return .notAnswering(detail)
+        case nil: return nil
+        }
     }
 
     private func tint(_ mode: Mode) -> Color {
         switch mode {
         case .run(let run): run.isRunning ? .blue : (run.succeeded ? .green : .red)
-        case .notSetUp, .starting: .orange
+        case .notSetUp, .starting, .notAnswering: .orange
         case .stopped, .unreachableNoScript: .red
         }
     }
@@ -273,6 +270,16 @@ struct ServicesCard: View {
                 Button("Start") { control.start(.start, showLog: false) }
                     .buttonStyle(.borderedProminent)
                     .disabled(control.isRunning)
+            }
+        case .notAnswering(let detail):
+            HStack {
+                StateDot(color: .orange)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Scheduler not answering").fontWeight(.semibold)
+                    Text(detail).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Open settings") { open(.services) }.buttonStyle(.borderless)
             }
         case .unreachableNoScript:
             HStack {
