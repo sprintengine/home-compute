@@ -124,7 +124,8 @@ hours); CI also stops the whole job after 30 minutes.
 - `test-node/dashboard-browser.test.mjs` (M4) runs the dashboard in Chromium
   (`playwright-core`) at 390×844 and 1440×900 against both Workers under
   `wrangler dev`, seeded by `test-node/support/dashboard-seed.mjs`: the
-  overview's attention list, a change made elsewhere appearing through
+  overview's order (running now, the next runs soonest first, attention)
+  and its empty states, a change made elsewhere appearing through
   `/v1/changes` (and no polling while hidden), Run now with arguments, a
   timetable edit that persists, drain and revoke, a join token shown once,
   the CSRF refusal, a viewer who sees no controls and is refused anyway, the

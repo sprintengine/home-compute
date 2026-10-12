@@ -802,9 +802,10 @@ the default. **Upgrade** reuses the steps; step 4 wins.
 
 ### Pages (mobile-first PWA, built on the `feature/dashboard` app)
 
-1. **Overview**, in order: **attention** (failed last runs, `lost`, runs waiting more than 10
-   minutes, offline or unhealthy machines, agents needing an update); **running now** (job, machine,
-   phase, elapsed, live peak memory); **next up** (next 6 slots with expected machine); **jobs**
+1. **Overview**, in order: **running now** (job, machine, phase, elapsed, live peak memory; the
+   longest-running first); **next up** (next 6 slots, soonest first, with expected machine; the very
+   next one largest); **attention** (failed last runs, `lost`, runs waiting more than 10 minutes,
+   offline or unhealthy machines, agents needing an update); **jobs**
    (card per job: schedule text, last outcome chip, `published` per model, a 20-run duration sparkline).
 2. **Job**: state and controls (Run now with optional extra args, Pause/Resume, Enable); **timetable
    editor** (hour chips, minute chips, Every hour, as in the Mac app); **placement** (required

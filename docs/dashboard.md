@@ -12,13 +12,15 @@ through `tailscale serve`, on a port of its own, over HTTPS.
 
 ## What it shows
 
-- **Overview.** Jobs needing attention come first, in red: a last run that
-  failed, a submission Bacalhau refused, or a run whose state can't be read.
-  Then what is running or queued (waiting for capacity), then every other
-  job: last run time, how long it took, its outcome (Published, No new run,
-  Failed, Completed), the model runs it published, peak memory when the job
-  reports it, and when it is next due. Jobs switched off in the timetable
-  share one line at the end.
+- **Overview.** What is running or queued (waiting for capacity) comes
+  first, each with how long it has been going, the longest-running first.
+  Then the next runs in schedule order, soonest first, the very next one
+  largest; here each job's next due time. Then jobs needing attention, in
+  red: a last run that failed, a submission Bacalhau refused, or a run whose
+  state can't be read. Then every job: last run time, how long it took, its
+  outcome (Published, No new run, Failed, Completed), the model runs it
+  published, peak memory when the job reports it, and when it is next due.
+  Jobs switched off in the timetable share one line at the end.
 - **A job.** Run now, Pause/Resume, the timetable (editable, see below), the
   last published run per model, and its run history: start, duration,
   outcome, queue time, exit code, peak memory, runs published.
@@ -240,17 +242,20 @@ above; against `hc-web` it adds machines, the timetable grid, settings and
 the audit log. Every page is laid out for a 390-pixel phone first, with a
 tab bar at the bottom, and for a desktop with a sidebar.
 
-- **Overview.** *Needs attention* first, the critical items before the
-  warnings: a last run that failed (with its error), a run lost in the last
-  day that no later run has settled, a run waiting more than ten minutes
-  (with why: `no machine has labels gpu=yes`, `preferred mac-mini busy`), a
-  machine offline, unhealthy or whose VM failed to start (with Colima's
-  error), a clock more than 30 s off, an agent older than the desired
-  version, and jobs blocked on vault secrets (one line per reason). Then
-  *Running now* (job, machine, phase including starting the VM and pulling,
-  elapsed time, peak memory against the limit), *Next up* (the next six
-  slots, in UTC and Irish time, with the machine expected to take each), and
-  a card per job: its schedule in UTC with Irish time beside it, last
+- **Overview.** *Running now* first: every run going (job, machine, phase
+  including starting the VM and pulling, how long it has been going, peak
+  memory against the limit), the longest-running first, then runs waiting
+  less than ten minutes for a machine. Then *Next up*: the next six slots in
+  schedule order, soonest first, in UTC and Irish time with the machine
+  expected to take each; the very next one is the large first item, with
+  why in full if it is blocked or no machine can take it. Then *Needs
+  attention*, the critical items before the warnings: a last run that
+  failed (with its error), a run lost in the last day that no later run has
+  settled, a run waiting more than ten minutes (with why: `no machine has
+  labels gpu=yes`, `preferred mac-mini busy`), a machine offline, unhealthy
+  or whose VM failed to start (with Colima's error), a clock more than 30 s
+  off, an agent older than the desired version, and jobs blocked on vault
+  secrets (one line per reason). Then a card per job: its schedule in UTC with Irish time beside it, last
   outcome, published model runs, and a sparkline of its last 20 runs'
   durations (failures in red). Jobs switched off fold into one line.
 - **A job.** Run now (with optional extra arguments, quoted as in a shell),
