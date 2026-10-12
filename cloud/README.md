@@ -165,6 +165,10 @@ dashboard's `X-CSRF-Token`) from `GET /v1/session`.
 | `GET` \| `PATCH /v1/settings` | admin | `globalPause`, `retention`, `roles`, `desiredAgentVersion` (null: the newest any enrolled machine runs). |
 | `POST /v1/import?dryRun=1` | admin | `{config: {jobs}, preset, variables, force?, pause?}` → per-job diff. |
 | `GET /v1/audit?before=&limit=` | admin | Every mutation with before/after. |
+| `GET /v1/secrets` | admin | The vault: names, key ids, hints, allowed labels, the jobs using each, and names jobs need that are not set. Never a value. |
+| `PUT` \| `DELETE /v1/secrets/:name` | admin | `{value, allowedLabels?}`, sealed in the Worker with `VAULT_PUBLIC_KEY`; the answer has the name, key id and hint only. |
+| `GET /v1/alerts` | viewer | Open alerts, the last week's resolved ones, the cron's last tick, email delivery. |
+| `POST /v1/alerts/test` | admin | A test alert the next cron minute emails, then resolves. |
 
 Roles come from the `roles` setting (`{"me@example.com": "admin",
 "service:<client-id>": "operator"}`) plus the `BOOTSTRAP_ADMINS` var.
@@ -182,36 +186,22 @@ Answers are `Cache-Control: no-store`.
 | `POST /agent/v1/sync` | 128 KB | §4.2: heartbeat, run progress and claim in one. Answers `{serverTime, nextSyncInMs, claims, cancel, upcoming, config, update: null, provisioningTasks: [], rotateCredential}`. An `upcoming` slot another machine is preferred for says `preferredElsewhere: true` (the agent does not pre-warm its VM for it). |
 | `POST /agent/v1/runs/:id/complete` | 256 KB | The final record. Idempotent; a lost run's late record settles it with `recovered`. |
 | `POST /agent/v1/provisioning/:id/events` | | 501 until M6. |
+| `GET /health`, `GET /health/cron` | | Liveness (200), and the cron's heartbeat: 503 once it is 5 minutes old (the dead-man check). |
 
 A 401 says `{"code": "revoked"}` for a revoked machine and
 `{"code": "unauthorized"}` otherwise.
 
-## Deploying (later; not done yet)
+## Deploying
 
-1. **Database.** `npx wrangler d1 create home-compute --location weur`, then put
-   the printed `database_id` in both `wrangler.*.jsonc` files.
-2. **Schema.** `npx wrangler d1 migrations apply home-compute --remote -c wrangler.web.jsonc`.
-3. **hc-core.** `npx wrangler deploy -c wrangler.core.jsonc`. Deploy the cron
-   once and leave it: trigger changes take up to 15 minutes to propagate.
-   For shadow mode (§9 phase 0), set the global pause before importing.
-4. **hc-web.** `npx wrangler secret put CSRF_KEY -c wrangler.web.jsonc` (32+
-   random bytes), set the `CORE_URL` var to hc-core's URL (it only goes into
-   the enrol command a join token is shown with), then
-   `npx wrangler deploy -c wrangler.web.jsonc`.
-5. **Access.** On `workers.dev`, enable Cloudflare Access on `hc-web` (Workers ›
-   hc-web › Settings › Domains & Routes); on a custom domain, add a self-hosted
-   Access application. Allow the owner's email (Google, GitHub or one-time PIN).
-   Copy the application's **AUD tag** and the team domain
-   (`<team>.cloudflareaccess.com`) into `ACCESS_AUD` and `ACCESS_TEAM_DOMAIN`,
-   set `BOOTSTRAP_ADMINS` to the owner's email, and deploy hc-web again. Never
-   put Access in front of `hc-core`: agents authenticate themselves (M2).
-6. **Service tokens.** Create one per client (CLI, menu bar app) under Access ›
-   Service Auth, add each to the application's policy with a *Service Auth*
-   rule, and give it a role: `PATCH /v1/settings {"roles": {"service:<client-id>": "admin"}}`.
-7. **Import.** `HC_URL=https://hc-web.<account>.workers.dev HC_ACCESS_CLIENT_ID=…
-   HC_ACCESS_CLIENT_SECRET=… home-compute cloud import <file> --preset wingfoil
-   --image ghcr.io/sprintengine/wingfoil-forecast@sha256:… --dry-run`, then again
-   without `--dry-run`. Add `--paused` to import every job paused.
+Deployed on 2026-10-12 in shadow mode. The runbook (first deployment,
+changes, Access, secrets, alerts, the Mac mini's agent and the per-job
+cut-over) is [docs/deploy.md](../docs/deploy.md). In short: migrations
+first (`npx wrangler d1 migrations apply home-compute --remote -c
+wrangler.web.jsonc`), then `npx wrangler deploy -c wrangler.core.jsonc` and
+`-c wrangler.web.jsonc`. Owner-specific values (the bootstrap admin, hc-core's
+URL, the vault keys, the alert addresses) are Worker secrets, never in these
+files. Until Access is set up, `scripts/local-admin.sh` runs hc-web locally
+against the deployed database as an admin.
 
 ## Notes on the implementation
 
