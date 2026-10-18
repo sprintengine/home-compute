@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
-  ABSOLUTE_MAX_RUN_SECONDS, CLOUDFLARE_MACHINE_ID, CLOUDFLARE_RUNTIME, containerCommand, containerWatch, estimateContainerCost,
-  exitCodeFromError, imageDigest, imagesMatch, INSTANCE_TYPES, interpretExit, localSecretNames, normaliseGuard, parseCgroup,
-  selectInstanceType, targetsCloudflare,
+  ABSOLUTE_MAX_RUN_SECONDS, CLOUDFLARE_MACHINE_ID, CLOUDFLARE_RUNTIME, containerCommand, deployedInstanceTypes, estimateContainerCost,
+  exitCodeFromError, imageDigest, imageRepository, imagesMatch, INSTANCE_TYPES, interpretExit, localSecretNames, normaliseGuard, parseProbe,
+  probeCommand, selectInstanceType, startIsTransient, targetsCloudflare, waitCommand, watchDecision, wrappedEntrypoint,
 } from "../src/core/cloudflare.mjs";
 import { normaliseJob } from "../src/core/job.mjs";
 import { CLOUDFLARE_INSTANCE_TYPES } from "../dashboard/lib.js";
@@ -13,19 +17,29 @@ test("the virtual machine id fits the dashboard route and the instance list matc
   assert.deepEqual(CLOUDFLARE_INSTANCE_TYPES, Object.keys(INSTANCE_TYPES));
 });
 
-test("instance type defaults to basic and refuses a job that does not fit", () => {
-  const basic = selectInstanceType({ instanceType: "basic", cpus: 0.25, memoryMiB: 1024, diskMiB: 4096 });
-  assert.equal(basic.ok, true);
-  assert.equal(basic.name, "basic");
+test("a run goes to the smallest deployed size its memory and disk fit, whatever CPU it asks for", () => {
+  // Wingfoil's jobs ask for one CPU and 512 MiB or 1 GiB: CPU-light, they run on basic.
+  assert.equal(selectInstanceType({ cpus: 1, memoryMiB: 1024, diskMiB: 4096 }).name, "basic");
+  assert.equal(selectInstanceType({ cpus: 1, memoryMiB: 512, diskMiB: 2048 }, ["lite", "basic"]).name, "basic");
+  assert.equal(selectInstanceType({ cpus: 0.25, memoryMiB: 256, diskMiB: 2048 }, ["lite", "basic"]).name, "lite");
+  assert.equal(selectInstanceType({ cpus: 1, memoryMiB: 3072, diskMiB: 4096 }, ["basic", "standard-1"]).name, "standard-1");
+  const basic = selectInstanceType({ memoryMiB: 1024, diskMiB: 4096 });
   assert.equal(basic.binding, "HC_CONTAINER_BASIC");
   assert.equal(basic.memoryMiB, 1024);
-  assert.equal(selectInstanceType({ cpus: 0.25, memoryMiB: 1024, diskMiB: 4096 }).name, "basic");
-  assert.match(selectInstanceType({ cpus: 1, memoryMiB: 2048, diskMiB: 2048 }).error, /exceeds the basic instance/);
-  assert.match(selectInstanceType({ instanceType: "lite", cpus: 1 / 16, memoryMiB: 256, diskMiB: 2048 }).name ?? "", /^lite$/);
-  assert.match(selectInstanceType({ instanceType: "lite", cpus: 0.25, memoryMiB: 256, diskMiB: 2048 }).error, /lite/);
-  assert.match(selectInstanceType({ instanceType: "standard-9", cpus: 0.25, memoryMiB: 256, diskMiB: 256 }).error, /unknown/);
-  assert.match(selectInstanceType({ instanceType: "basic", cpus: 0.25, memoryMiB: 2048, diskMiB: 4096 }).error, /memoryMiB/);
-  assert.match(selectInstanceType({ instanceType: "basic", cpus: 0.25, memoryMiB: 1024, diskMiB: 8192 }).error, /diskMiB/);
+  // Nothing deployed fits: fail closed, never reach for a size that is not there.
+  assert.match(selectInstanceType({ memoryMiB: 2048, diskMiB: 2048 }).error, /no deployed instance type holds 2048 MiB/);
+  assert.match(selectInstanceType({ memoryMiB: 1024, diskMiB: 12288 }).error, /12288 MiB disk/);
+  // A named size must be deployed and must hold the job.
+  assert.equal(selectInstanceType({ instanceType: "basic", memoryMiB: 512, diskMiB: 1024 }).name, "basic");
+  assert.match(selectInstanceType({ instanceType: "standard-1", memoryMiB: 512, diskMiB: 1024 }).error, /not deployed/);
+  assert.match(selectInstanceType({ instanceType: "lite", memoryMiB: 512, diskMiB: 1024 }, ["lite"]).error, /do not fit lite/);
+  assert.match(selectInstanceType({ instanceType: "standard-9" }).error, /unknown/);
+});
+
+test("the deployed sizes are the container bindings hc-core has", () => {
+  assert.deepEqual(deployedInstanceTypes({ HC_CONTAINER_BASIC: {}, OTHER: {} }), ["basic"]);
+  assert.deepEqual(deployedInstanceTypes({ HC_CONTAINER_STANDARD_1: {}, HC_CONTAINER_LITE: {} }), ["lite", "standard-1"]);
+  assert.deepEqual(deployedInstanceTypes({}), []);
 });
 
 test("a job targets Cloudflare only through the reserved runtime label", () => {
@@ -34,13 +48,17 @@ test("a job targets Cloudflare only through the reserved runtime label", () => {
   assert.equal(targetsCloudflare({}), false);
 });
 
-test("image identity is the digest, and the command is one entrypoint", () => {
+test("a tag runs the deployed version of its repository; a pinned digest must be the deployed one", () => {
   const digest = "ab".repeat(32);
-  const deployed = `registry.cloudflare.com/acct/job@sha256:${digest}`;
-  assert.equal(imagesMatch(deployed, deployed), true);
-  assert.equal(imagesMatch(`ghcr.io/org/job@sha256:${digest.toUpperCase()}`, deployed), true);
-  assert.equal(imagesMatch(`ghcr.io/org/job@sha256:${"cd".repeat(32)}`, deployed), false);
-  assert.equal(imagesMatch("ghcr.io/org/job:latest", deployed), false);
+  const deployed = `registry.cloudflare.com/acct/wingfoil-forecast@sha256:${digest}`;
+  assert.equal(imageRepository(deployed), "wingfoil-forecast");
+  assert.equal(imageRepository("ghcr.io/sprintengine/wingfoil-forecast:production"), "wingfoil-forecast");
+  assert.equal(imageRepository("localhost:5000/team/job"), "job");
+  assert.equal(imagesMatch("ghcr.io/sprintengine/wingfoil-forecast:production", deployed), true);
+  assert.equal(imagesMatch("ghcr.io/sprintengine/wingfoil-forecast", deployed), true);
+  assert.equal(imagesMatch(`ghcr.io/sprintengine/wingfoil-forecast@sha256:${digest.toUpperCase()}`, deployed), true);
+  assert.equal(imagesMatch(`ghcr.io/sprintengine/wingfoil-forecast@sha256:${"cd".repeat(32)}`, deployed), false);
+  assert.equal(imagesMatch("ghcr.io/sprintengine/other:production", deployed), false);
   assert.equal(imagesMatch(deployed, ""), false);
   assert.equal(imageDigest(deployed), `sha256:${digest}`);
   assert.deepEqual(containerCommand({ entrypoint: ["python"], args: ["-m", "job"] }, ["--once"]), ["python", "-m", "job", "--once"]);
@@ -48,30 +66,71 @@ test("image identity is the digest, and the command is one entrypoint", () => {
   assert.deepEqual(localSecretNames({ secretEnv: { A: "local:A", B: "vault:b" } }), ["A"]);
 });
 
-test("guards, exits and the watch decision", () => {
+test("a clean exit is never out of memory, even with the cgroup peak at the limit", () => {
   assert.deepEqual(normaliseGuard({}), { maxConcurrent: 1, maxRunSeconds: 1200 });
   assert.equal(ABSOLUTE_MAX_RUN_SECONDS, 1200);
   assert.throws(() => normaliseGuard({ maxConcurrent: 0 }), /maxConcurrent/);
   assert.throws(() => normaliseGuard({ maxRunSeconds: 1201 }), /maxRunSeconds/);
   assert.equal(interpretExit({ exitCode: 0 }).failed, false);
+  // Page cache counts towards memory.peak: a job that downloads files reaches the limit and exits 0.
+  assert.equal(interpretExit({ exitCode: 0, peakMemoryBytes: 1024, memoryLimitBytes: 1024 }).oomKilled, false);
+  assert.equal(interpretExit({ exitCode: 1, peakMemoryBytes: 1024, memoryLimitBytes: 1024 }).oomKilled, true);
+  assert.equal(interpretExit({ exitCode: 1, peakMemoryBytes: 512, memoryLimitBytes: 1024 }).oomKilled, false);
   assert.equal(interpretExit({ exitCode: 137 }).oomKilled, true);
   assert.equal(interpretExit({ exitCode: 137, stopReason: "timeout" }).oomKilled, false);
-  assert.equal(interpretExit({ exitCode: 137, stopReason: "timeout" }).timedOut, true);
-  assert.equal(interpretExit({ exitCode: 0, peakMemoryBytes: 1024, memoryLimitBytes: 1024 }).oomKilled, true);
+  assert.equal(interpretExit({ exitCode: null, stopReason: "timeout" }).timedOut, true);
   assert.equal(interpretExit({}).failed, true);
   assert.equal(exitCodeFromError(new Error("Container exited, exit code: 0")), 0);
   assert.equal(exitCodeFromError(new Error("no instance")), null);
-  const now = 1_000_000;
-  assert.equal(containerWatch({ state: "running", deadlineAt: now + 1 }, now).action, "renew");
-  assert.equal(containerWatch({ state: "running", deadlineAt: now }, now).stopReason, "timeout");
-  assert.deepEqual(containerWatch({ state: "lost", deadlineAt: now + 1 }, now), { action: "destroy", stopReason: "lost", complete: false });
-  assert.equal(containerWatch({ state: "cancelled", deadlineAt: now + 1 }, now).stopReason, "cancel");
-  assert.equal(containerWatch({ state: "succeeded", deadlineAt: now + 1 }, now).complete, false);
+  assert.equal(startIsTransient(new Error("there is no container instance that can be provided to this durable object")), true);
+  assert.equal(startIsTransient(new Error("you are requesting too many containers per second")), true);
+  assert.equal(startIsTransient(new Error("image not found")), false);
 });
 
-test("cgroup text and a 20 minute basic run's list-price upper bound", () => {
-  assert.deepEqual(parseCgroup("memory.peak 1048576\nusage_usec 2500000\n"), { peakMemoryBytes: 1048576, cpuMicroseconds: 2500000 });
-  assert.deepEqual(parseCgroup(""), {});
+test("the watch decision: renew while running, settle on exit or deadline, stop what ended elsewhere", () => {
+  const now = 1_000_000;
+  assert.equal(watchDecision({ state: "running", deadlineAt: now + 1 }, now).action, "renew");
+  assert.deepEqual(watchDecision({ state: "running", deadlineAt: now + 1, exitCode: 0 }, now), { action: "settle", settle: true, stopReason: null });
+  assert.equal(watchDecision({ state: "running", deadlineAt: now + 1, exitCode: 2 }, now).action, "settle");
+  assert.equal(watchDecision({ state: "running", deadlineAt: now }, now).stopReason, "timeout");
+  // An exit that lands at the deadline is the job's own result, not a timeout.
+  assert.equal(watchDecision({ state: "running", deadlineAt: now, exitCode: 0 }, now).stopReason, null);
+  assert.deepEqual(watchDecision({ state: "lost", deadlineAt: now + 1 }, now), { action: "stop", stopReason: "lost", settle: false });
+  assert.equal(watchDecision({ state: "cancelled", deadlineAt: now + 1, exitCode: 0 }, now).stopReason, "cancel");
+  assert.equal(watchDecision({ state: "timed-out", deadlineAt: now + 1 }, now).settle, false);
+});
+
+test("the wrapper and probe, run in a real shell, give back the exit code, the output and the reports", () => {
+  const dir = join(mkdtempSync(join(tmpdir(), "hc-wrapper-")), "hc");
+  const job = ["sh", "-c", "echo start; echo '{\"event\": \"forecast_complete\", \"model\": \"harmonie\"}'; echo 'boom' >&2; exit 3"];
+  const [command, ...args] = wrappedEntrypoint(job, 1, dir);
+  const wrapper = spawnSync(command, args, { encoding: "utf8" });
+  // Output still reaches the container's own stdout (Workers Logs), and the hold ends after a second.
+  assert.match(wrapper.stdout, /start\n.*forecast_complete.*\nboom/s);
+  const [waitBinary, ...waitArgs] = waitCommand(dir);
+  assert.equal(spawnSync(waitBinary, waitArgs, { timeout: 5000 }).status, 0);
+  const [probeBinary, ...probeArgs] = probeCommand("n0nce", dir);
+  const probe = parseProbe(execFileSync(probeBinary, probeArgs, { encoding: "utf8" }), "n0nce");
+  assert.equal(probe.exitCode, 3);
+  assert.equal(probe.linesTotal, 3);
+  assert.ok(probe.bytesTotal > 20);
+  assert.deepEqual(probe.reportLines, ['{"event": "forecast_complete", "model": "harmonie"}']);
+  assert.deepEqual(probe.tailLines, ["start", '{"event": "forecast_complete", "model": "harmonie"}', "boom"]);
+});
+
+test("a probe of a job still going has no exit code, and the job's output cannot forge a section", () => {
+  const text = ["@@abc exit", "@@abc memory", "52428800", "@@abc cpu", "usage_usec 2500000", "@@abc size", "  12", " 2",
+    "@@abc reports", "@@abc tail", "@@xyz exit", "0", ""].join("\n");
+  const probe = parseProbe(text, "abc");
+  assert.equal(probe.exitCode, null);
+  assert.equal(probe.peakMemoryBytes, 52428800);
+  assert.equal(probe.cpuMicroseconds, 2500000);
+  assert.equal(probe.bytesTotal, 12);
+  assert.equal(probe.linesTotal, 2);
+  assert.deepEqual(probe.tailLines, ["@@xyz exit", "0"]);
+});
+
+test("a 20 minute basic run's list-price upper bound", () => {
   const cost = estimateContainerCost({ basic: 1200 });
   assert.equal(cost.containerSeconds, 1200);
   assert.ok(Math.abs(cost.estimatedUsd - 0.009336) < 1e-9, cost.estimatedUsd);

@@ -265,7 +265,7 @@ function resourcesCard(job, definition, runs) {
     draft ? resourcesForm(job, draft, hint) : [
       facts([
         ["CPU", resources.cpus], ["Memory", mib(resources.memoryMiB)], ["Disk", mib(resources.diskMiB)],
-        ["Instance", resources.instanceType || "default (basic on Cloudflare)"],
+        ["Cloudflare size", resources.instanceType || "smallest that holds this memory and disk"],
       ]),
       h("p", { class: `muted small hint${hint.peak && hint.peak > resources.memoryMiB * 0.9 ? " warn" : ""}` }, hint.text),
     ]);
@@ -292,9 +292,9 @@ function resourcesForm(job, draft, hint) {
         `${hint.text.replace(/; limit .*$/, "")}; limit ${mib(draft.memoryMiB)}`, low ? " · below the peak plus 10%: the run may be killed for memory" : "")),
     h("label", { class: "field" }, h("span", {}, "Cloudflare instance type"),
       h("select", { id: "rs-instance", value: draft.instanceType, onchange: (event) => { draft.instanceType = event.target.value; } },
-        h("option", { value: "" }, "Default (basic, when the job runs on Cloudflare)"),
+        h("option", { value: "" }, "Automatic: the smallest deployed size that holds the memory and disk"),
         ...CLOUDFLARE_INSTANCE_TYPES.map((name) => h("option", { value: name, selected: draft.instanceType === name }, name)))),
-    h("p", { class: "muted small" }, "basic is 1 GiB and 4 GB disk. A Cloudflare job must fit the type it names; a larger type has to be deployed on hc-core before a run can use it."),
+    h("p", { class: "muted small" }, "Only used when the job runs on Cloudflare. basic is 1/4 vCPU, 1 GiB and 4 GB disk; CPU does not choose the size, as Cloudflare bills only the CPU a run uses. A size other than basic has to be deployed on hc-core first."),
     h("div", { class: "row" },
       h("label", { class: "field narrow" }, h("span", {}, "CPU"), h("input", { type: "number", id: "rs-cpus", min: 0.0625, max: 64, step: 0.0625, value: draft.cpus, oninput: (event) => { draft.cpus = event.target.value; } })),
       h("label", { class: "field narrow" }, h("span", {}, "Disk (MiB)"), h("input", { type: "number", id: "rs-disk", min: 1, step: 1, value: draft.diskMiB, oninput: (event) => { draft.diskMiB = event.target.value; } }))),

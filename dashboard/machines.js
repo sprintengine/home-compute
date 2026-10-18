@@ -50,6 +50,10 @@ function machineCard(machine, now) {
       ["Caps", capsText(machine.capacity)],
       ["Labels", labelsText(machine.labels) || "none"],
       ["Agent", isCloudflareExecutor(machine) ? "Cloudflare Containers (no agent)" : [machine.agentVersion ?? "unknown", machine.updateAvailable ? h("span", { class: "chip warning small-chip" }, `update to ${machine.desiredAgentVersion}`) : null]],
+      ...(isCloudflareExecutor(machine) ? [
+        ["Image", machine.facts?.image || "none deployed (cloud/scripts/set-container-image.sh)"],
+        ["Sizes", (machine.facts?.instanceTypes ?? []).join(", ") || "none deployed"],
+      ] : []),
       ["Last seen", machine.lastSeenAt ? relative(machine.lastSeenAt, now) : "never"],
       ["Clock", skewText(machine)],
     ]),

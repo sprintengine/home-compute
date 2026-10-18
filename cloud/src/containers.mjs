@@ -1,22 +1,31 @@
-// The Cloudflare Containers executor. The minute cron calls
-// `dispatchCloudflare` and returns: it never waits out a run. Each run is a
-// Durable Object (`HcContainerBasic`) whose alarm keeps the container alive
-// for the run, then `recordContainerStop` writes the same `runs` row an
-// agent's completion does. Secrets are handed to the container and are not
-// written to D1.
+// The Cloudflare Containers executor. The minute cron (and the dashboard's
+// Run now and Cancel, through hc-core's `Dispatcher` entrypoint) calls
+// `dispatchCloudflare`, which checks the runs already going and starts the
+// ones that are due; it never waits out a run. Each run is a Durable Object
+// (container-do.mjs) whose alarm keeps the container alive for the run,
+// renews the run's lease while the container answers, keeps the dashboard's
+// log tail current, and settles the run through `recordContainerStop`: the
+// same `runs` row, log and reports an agent's completion writes. Secrets are
+// handed to the container and are not written to D1.
 
 import {
   CLOUDFLARE_LEASE_MS, CLOUDFLARE_MACHINE_ID, CLOUDFLARE_MACHINE_NAME, CLOUDFLARE_RUNTIME, CONTAINER_INCLUDED, CONTAINER_PRICES,
-  DEFAULT_GUARD, EXECUTOR_LABELS, INSTANCE_BINDINGS, TIMEOUT_GRACE_MS, containerCommand, estimateContainerCost, exitCodeFromError,
-  imageDigest, imagesMatch, interpretExit, localSecretNames, normaliseGuard, selectInstanceType, targetsCloudflare,
+  DEFAULT_GUARD, EXECUTOR_LABELS, INSTANCE_BINDINGS, INSTANCE_TYPES, containerCommand, deployedInstanceTypes, estimateContainerCost,
+  exitCodeFromError, imageDigest, imagesMatch, interpretExit, localSecretNames, normaliseGuard, selectInstanceType, startIsTransient,
+  targetsCloudflare,
 } from "../../src/core/cloudflare.mjs";
+import { boundLines, extractError } from "../../src/core/logs.mjs";
 import { claimBlockers, secretsRefused } from "../../src/core/placement.mjs";
+import { FINAL_TAIL, MAX_ERROR_DETAIL, MAX_LINE_CHARS } from "../../src/core/protocol.mjs";
+import { createRedactor, redactValue, secretForms } from "../../src/core/redact.mjs";
+import { parseReports, runOutcome } from "../../src/core/reports.mjs";
 import { vaultNames } from "../../src/core/vault.mjs";
 import { complete } from "./complete.mjs";
 import { ACTIVE_SQL, bumpMachinesVersion, readSettings } from "./db.mjs";
 import { iso, json } from "./http.mjs";
 import { jobsAt } from "./jobcache.mjs";
 import { openSecretsFor, secretsAt } from "./secrets.mjs";
+import { logTailStatement } from "./sync.mjs";
 
 const MACHINE = { id: CLOUDFLARE_MACHINE_ID };
 const USAGE_WINDOW_MS = 30 * 86_400_000;
@@ -44,36 +53,99 @@ function stubFor(binding, name) {
   return binding.get(binding.idFromName(name));
 }
 
-/** The real starter: one Durable Object, named for the run, per start. */
+async function currentJobs(db) {
+  const row = await db.prepare("SELECT value_json FROM settings WHERE key = 'jobs_version'").first();
+  return jobsAt(db, String(parse(row?.value_json, 0)));
+}
+
+/** The real starter: one Durable Object, named for the run, per start. Answers the image the container runs, when it says. */
 export function starterFromEnv(env) {
   return {
     async start(spec) {
       const binding = env[spec.binding];
       if (!binding) throw new Error(`instance type ${spec.instanceType} is not deployed (binding ${spec.binding} is missing on hc-core)`);
-      await stubFor(binding, spec.runId).startRun(spec);
+      return stubFor(binding, spec.runId).startRun(spec);
     },
   };
 }
 
+/** The values a run's output is redacted of: its vault secrets, opened again (a restarted Durable Object no longer holds them). */
+export async function secretValuesForJob(env, jobId) {
+  const job = (await currentJobs(env.DB)).get(jobId);
+  const names = job ? vaultNames(job) : [];
+  if (!names.length) return [];
+  try {
+    const opened = await openSecretsFor(env.DB, env, names, EXECUTOR_LABELS);
+    return Object.values(opened.values).filter((value) => typeof value === "string");
+  } catch (error) {
+    console.error(JSON.stringify({ event: "container_redaction_secrets_error", job: jobId, error: safeError(error) }));
+    return [];
+  }
+}
+
+function redactedLines(lines, secretValues) {
+  const redact = createRedactor(secretForms(secretValues ?? []));
+  return (lines ?? []).map((line) => {
+    const text = redact(line);
+    return text.length > MAX_LINE_CHARS ? `${text.slice(0, MAX_LINE_CHARS)} …[line cut]` : text;
+  });
+}
+
+function tailFrom(probe, secretValues, bounds) {
+  const lines = redactedLines(probe?.tailLines, secretValues);
+  const { lines: kept, truncated } = boundLines(lines, bounds);
+  const linesTotal = probe?.linesTotal ?? lines.length;
+  return {
+    lines,
+    tail: {
+      text: kept.join("\n"),
+      bytesTotal: probe?.bytesTotal ?? kept.join("\n").length,
+      linesTotal,
+      truncated: truncated || linesTotal > kept.length,
+    },
+  };
+}
+
+/** The statement that stores a running (or, with `final`, a closing) log tail from a probe. */
+export function runningTail(db, runId, probe, secretValues, now, bounds, { final = false } = {}) {
+  return logTailStatement(db, runId, tailFrom(probe, secretValues, bounds ?? FINAL_TAIL).tail, { now, final });
+}
+
 /**
- * Settles a container run through the same completion as an agent. `lost`
- * does not settle: destroying a container the lease already gave up on must
- * not record a SIGKILL as the run's result. A later natural exit (no stop
- * reason) still completes and is recovered.
+ * Settles a container run through the same completion as an agent: exit
+ * code, outcome from the job's reports, error and detail from its output,
+ * the final log tail. `lost` does not settle: destroying a container the
+ * lease already gave up on must not record a SIGKILL as the run's result.
  */
 export async function recordContainerStop(db, runId, details, now) {
   if (details.stopReason === "lost") return { ignored: true, reason: "lost" };
   const run = await db.prepare("SELECT * FROM runs WHERE id = ?").bind(runId).first();
   if (!run || run.machine_id !== CLOUDFLARE_MACHINE_ID) return { ignored: true, reason: "not-ours" };
+  const job = (await currentJobs(db)).get(run.job_id) ?? null;
   const prior = parse(run.metrics_json, {}) ?? {};
+  const peakMemoryBytes = details.peakMemoryBytes ?? run.peak_memory_bytes ?? null;
   const interpreted = details.failed
     ? { failed: true, timedOut: false, oomKilled: false, exitCode: null, cancelled: false }
     : interpretExit({
       exitCode: details.exitCode ?? null,
-      peakMemoryBytes: details.peakMemoryBytes ?? run.peak_memory_bytes,
+      peakMemoryBytes,
       memoryLimitBytes: run.memory_limit_bytes,
       stopReason: details.stopReason ?? null,
     });
+  const { lines, tail } = details.probe ? tailFrom(details.probe, details.secretValues, FINAL_TAIL) : { lines: [], tail: null };
+  const redact = createRedactor(secretForms(details.secretValues ?? []));
+  const reports = details.probe ? redactValue(parseReports(redactedLines(details.probe.reportLines, details.secretValues).join("\n")), redact) : [];
+  let error = details.error ?? null;
+  let errorDetail = null;
+  if (!error && !interpreted.cancelled) {
+    const outcome = runOutcome({ ...interpreted, reports, report: job?.report });
+    if (outcome === "failed") {
+      ({ error, errorDetail } = extractError(lines, {
+        reports, oomKilled: interpreted.oomKilled, memoryLimitBytes: run.memory_limit_bytes, timedOut: interpreted.timedOut,
+        runSeconds: job?.timeouts?.runSeconds ?? null, exitCode: interpreted.exitCode, maxDetail: MAX_ERROR_DETAIL,
+      }));
+    }
+  }
   const startedAt = run.started_at;
   const container = prior.instanceType ? {
     instanceType: prior.instanceType,
@@ -88,15 +160,17 @@ export async function recordContainerStop(db, runId, details, now) {
     timedOut: interpreted.timedOut,
     failed: interpreted.failed,
     cancelled: interpreted.cancelled,
-    error: details.error ?? null,
-    reports: [],
+    error,
+    errorDetail,
+    reports,
+    ...(tail ? { logTail: tail } : {}),
     stats: {
-      peakMemoryBytes: details.peakMemoryBytes ?? null,
+      peakMemoryBytes,
       memoryLimitBytes: run.memory_limit_bytes,
       avgCpuPct: null,
       peakCpuPct: null,
       cpuSeconds: details.cpuSeconds ?? null,
-      samples: details.peakMemoryBytes || details.cpuSeconds ? 1 : 0,
+      samples: peakMemoryBytes || details.cpuSeconds ? 1 : 0,
     },
     durations: {
       durationMs: typeof startedAt === "number" ? Math.max(0, now - startedAt) : null,
@@ -150,8 +224,13 @@ async function loadGuard(db) {
   return normaliseGuard(stored.cloudflare ?? {});
 }
 
+function capacityOf(deployed, guard) {
+  const largest = INSTANCE_TYPES[deployed.at(-1) ?? "basic"];
+  return { cpus: largest.vcpu, memoryMiB: largest.memoryMiB, diskMiB: largest.diskMiB, maxRuns: guard.maxConcurrent };
+}
+
 /** Creates the virtual machine the first time a job targets it. A revoked row stays revoked. */
-async function ensureExecutor(db, now, guard) {
+async function ensureExecutor(db, now, guard, deployed) {
   const existing = await db.prepare("SELECT id, revoked_at, drain, last_seen_at, facts_json, capacity_json FROM machines WHERE id = ?").bind(CLOUDFLARE_MACHINE_ID).first();
   if (existing) return existing;
   const named = await db.prepare("SELECT id FROM machines WHERE name = ?").bind(CLOUDFLARE_MACHINE_NAME).first();
@@ -159,11 +238,12 @@ async function ensureExecutor(db, now, guard) {
     console.error(JSON.stringify({ event: "cloudflare_executor_name_taken", machine: named.id }));
     return { error: `a machine is already named ${CLOUDFLARE_MACHINE_NAME}` };
   }
-  const capacity = { cpus: 0.25, memoryMiB: 1024, diskMiB: 4096, maxRuns: guard.maxConcurrent };
+  const capacity = capacityOf(deployed, guard);
   const inserted = await db.batch([
     db.prepare(`INSERT INTO machines (id, name, labels_json, capabilities, capacity_json, facts_json, health_json, agent_version,
         credential_hash, credential_issued_at, drain, enrolled_at)
-      VALUES (?1, ?2, ?3, '', ?4, '{}', '{"docker":"ok"}', NULL, ?5, ?6, 0, ?6)`).bind(
+      VALUES (?1, ?2, ?3, '', ?4, '{}', '{"docker":"ok"}', NULL, ?5, ?6, 0, ?6)
+      ON CONFLICT DO NOTHING`).bind(
       CLOUDFLARE_MACHINE_ID, CLOUDFLARE_MACHINE_NAME, JSON.stringify(EXECUTOR_LABELS), JSON.stringify(capacity), randomHex(32), now,
     ),
     bumpMachinesVersion(db),
@@ -172,17 +252,20 @@ async function ensureExecutor(db, now, guard) {
   return { id: CLOUDFLARE_MACHINE_ID, revoked_at: null, drain: 0, last_seen_at: null, facts_json: "{}", capacity_json: JSON.stringify(capacity) };
 }
 
-async function touchExecutor(db, row, now, guard, usage) {
+/** What the dashboard's machine page shows for the executor: the deployed image and sizes, the guard, and the 30-day cost. */
+async function touchExecutor(db, row, now, guard, usage, { deployed, image }) {
   const facts = {
     runtime: "cloudflare-containers", os: "linux", arch: "amd64",
+    image: image || null,
+    imageDigest: imageDigest(image),
+    instanceTypes: deployed,
     containerSeconds30d: usage.containerSeconds,
     estimatedUsd30d: Number(usage.estimatedUsd.toFixed(6)),
     maxConcurrent: guard.maxConcurrent,
     maxRunSeconds: guard.maxRunSeconds,
   };
-  const capacity = { cpus: 0.25, memoryMiB: 1024, diskMiB: 4096, maxRuns: guard.maxConcurrent };
   const factsJson = JSON.stringify(facts);
-  const capacityJson = JSON.stringify(capacity);
+  const capacityJson = JSON.stringify(capacityOf(deployed, guard));
   const stale = row.last_seen_at === null || now - row.last_seen_at >= 60_000;
   if (!stale && factsJson === row.facts_json && capacityJson === (row.capacity_json ?? "")) return;
   await db.prepare(`UPDATE machines SET facts_json = ?1, capacity_json = ?2, health_json = '{"docker":"ok"}', last_seen_at = ?3
@@ -196,46 +279,56 @@ async function stampContainerSeconds(db) {
       AND json_extract(metrics_json, '$.containerSeconds') IS NULL`).bind(CLOUDFLARE_MACHINE_ID).run();
 }
 
-async function renewLeases(db, now) {
-  await db.prepare(`UPDATE runs SET lease_expires_at = ?1
-    WHERE machine_id = ?2 AND state IN (${ACTIVE_SQL})
-      AND (started_at IS NULL OR started_at + COALESCE((SELECT json_extract(j.timeouts_json, '$.runSeconds') FROM jobs j WHERE j.id = runs.job_id), 0) * 1000 + ${TIMEOUT_GRACE_MS} >= ?3)`)
-    .bind(now + CLOUDFLARE_LEASE_MS, CLOUDFLARE_MACHINE_ID, now).run();
-}
+/** How long after a run ends elsewhere (cancelled, timed out, lost) its object is still asked to check, so its container goes at once. */
+const ENDED_CHECK_MS = 30 * 60_000;
 
-async function tickActive(env, db) {
-  const { results } = await db.prepare(`SELECT id, metrics_json FROM runs WHERE machine_id = ? AND state IN (${ACTIVE_SQL})`).bind(CLOUDFLARE_MACHINE_ID).all();
-  for (const run of results) {
+/**
+ * Asks the Durable Object of each run going, and of each run that ended
+ * elsewhere in the last half hour, to check its container. The object
+ * renews the lease only when the container answers, so nothing here renews
+ * one: a run whose container is gone is marked lost by `expireLeases`. An
+ * ended run's object destroys its container (a cancel takes effect at once,
+ * and the instance is free for the next run).
+ */
+async function checkActive(env, db, now) {
+  const { results } = await db.prepare(`SELECT id, metrics_json FROM runs WHERE machine_id = ?1
+    AND (state IN (${ACTIVE_SQL}) OR (state IN ('cancelled', 'timed-out', 'lost') AND updated_at >= ?2))`)
+    .bind(CLOUDFLARE_MACHINE_ID, now - ENDED_CHECK_MS).all();
+  await Promise.all(results.map(async (run) => {
     const instanceType = parse(run.metrics_json, {})?.instanceType ?? "basic";
     const binding = env[INSTANCE_BINDINGS[instanceType] ?? ""];
-    if (!binding) continue;
+    if (!binding) return;
     try {
       await stubFor(binding, run.id).tick();
     } catch (error) {
       console.error(JSON.stringify({ event: "container_tick_error", run: run.id, error: safeError(error) }));
     }
-  }
+  }));
 }
 
 async function failRun(db, runId, error, now) {
   await recordContainerStop(db, runId, { failed: true, error }, now);
 }
 
-async function claimRun(db, run, job, selected, now) {
-  const metrics = {
-    instanceType: selected.name, memoryMiB: selected.memoryMiB, diskMiB: selected.diskMiB,
-  };
+async function claimRun(db, run, job, selected, image, now) {
+  const metrics = { instanceType: selected.name, memoryMiB: selected.memoryMiB, diskMiB: selected.diskMiB };
   if (typeof selected.vcpu === "number") metrics.vcpu = selected.vcpu;
-  const metricsJson = JSON.stringify(metrics);
   const result = await db.prepare(`UPDATE runs SET state = 'claimed', machine_id = ?1, lease_expires_at = ?2, claimed_at = ?3,
       job_revision = ?4, image_ref = ?5, image_digest = ?6, memory_limit_bytes = ?7, metrics_json = ?8, updated_at = ?3
     WHERE id = ?9 AND state = 'due'
       AND NOT EXISTS (SELECT 1 FROM runs a WHERE a.job_id = ?10 AND a.state IN (${ACTIVE_SQL}))`)
     .bind(
-      CLOUDFLARE_MACHINE_ID, now + CLOUDFLARE_LEASE_MS, now, job.revision, job.image, imageDigest(job.image),
-      selected.memoryMiB * 1048576, metricsJson, run.id, run.job_id,
+      CLOUDFLARE_MACHINE_ID, now + CLOUDFLARE_LEASE_MS, now, job.revision, job.image, imageDigest(image) ?? imageDigest(job.image),
+      selected.memoryMiB * 1048576, JSON.stringify(metrics), run.id, run.job_id,
     ).run();
   return result.meta.changes === 1;
+}
+
+/** A start that may work in a later minute (no instance free yet): the claim is undone and the run waits again. */
+async function unclaim(db, runId, now) {
+  await db.prepare(`UPDATE runs SET state = 'due', machine_id = NULL, lease_expires_at = NULL, claimed_at = NULL, started_at = NULL,
+      image_ref = NULL, image_digest = NULL, memory_limit_bytes = NULL, metrics_json = NULL, updated_at = ?1
+    WHERE id = ?2 AND state IN ('claimed', 'running') AND machine_id = ?3`).bind(now, runId, CLOUDFLARE_MACHINE_ID).run();
 }
 
 function secretEnv(job, values) {
@@ -244,10 +337,25 @@ function secretEnv(job, values) {
     .map(([name, reference]) => [name, values[reference.slice(6)]]));
 }
 
+/** Why this run cannot start on Cloudflare at all (it is claimed and failed so the schedule moves on), or an empty list. */
+function startProblems(job, selected, guard, image) {
+  const problems = [];
+  if (!selected.ok) problems.push(selected.error);
+  if (job.timeouts.runSeconds > guard.maxRunSeconds) {
+    problems.push(`timeouts.runSeconds ${job.timeouts.runSeconds} exceeds the Cloudflare guard of ${guard.maxRunSeconds}s`);
+  }
+  const local = localSecretNames(job);
+  if (local.length) problems.push(`local: secrets are not available on Cloudflare Containers (${local.join(", ")}); use vault: secrets`);
+  if (!image) problems.push("no Cloudflare container image is deployed: run cloud/scripts/set-container-image.sh, then deploy hc-core");
+  else if (!imagesMatch(job.image, image)) problems.push(`job image ${job.image} is not the image deployed on Cloudflare (${image})`);
+  if (!containerCommand(job, [])) problems.push("a Cloudflare job needs an entrypoint: the image's own entrypoint cannot be wrapped to read its output");
+  return problems;
+}
+
 /**
- * One cron pass. No-ops (one indexed read) when no job targets
- * `runtime=cloudflare-container`, so a deployment that never uses this
- * executor does not gain a machine row.
+ * One pass: check the runs going, then start what is due, up to the guard.
+ * No-ops (one indexed read) when no job targets `runtime=cloudflare-container`,
+ * so a deployment that never uses this executor does not gain a machine row.
  */
 export async function dispatchCloudflare(env, now, options = {}) {
   const db = env.DB;
@@ -255,16 +363,17 @@ export async function dispatchCloudflare(env, now, options = {}) {
     .bind(CLOUDFLARE_RUNTIME).first();
   if (!labelled) return { jobs: 0 };
   const summary = { jobs: 1, started: 0, failed: 0, leftDue: 0 };
+  const deployed = options.deployed ?? (options.starter ? ["basic"] : deployedInstanceTypes(env));
+  const image = options.image ?? env.HC_CONTAINER_IMAGE ?? "";
   const guard = await loadGuard(db);
-  const row = await ensureExecutor(db, now, guard);
+  const row = await ensureExecutor(db, now, guard, deployed);
   if (row?.error) return { ...summary, error: row.error };
   if (row?.revoked_at) return { ...summary, revoked: true };
   await stampContainerSeconds(db);
-  await renewLeases(db, now);
-  if (!options.starter) await tickActive(env, db);
+  await checkActive(env, db, now);
   const usage = () => containerUsage(db, now, guard);
   if (row?.drain === 1) {
-    await touchExecutor(db, row, now, guard, await usage());
+    await touchExecutor(db, row, now, guard, await usage(), { deployed, image });
     return { ...summary, drained: true };
   }
   const [versionRow, secretsRow, pauseRow] = (await db.batch([
@@ -286,7 +395,6 @@ export async function dispatchCloudflare(env, now, options = {}) {
     .map((run) => ({ run, job: jobs.get(run.job_id) }))
     .filter((entry) => entry.job && targetsCloudflare(entry.job))
     .sort((a, b) => (b.job.policy?.priority ?? 0) - (a.job.policy?.priority ?? 0) || a.run.due_at - b.run.due_at);
-  const deployed = options.image ?? env.HC_CONTAINER_IMAGE ?? "";
   const starter = options.starter ?? starterFromEnv(env);
   const labels = EXECUTOR_LABELS;
   for (const { run, job } of candidates) {
@@ -299,27 +407,10 @@ export async function dispatchCloudflare(env, now, options = {}) {
       summary.leftDue += 1;
       continue;
     }
-    const selected = selectInstanceType(job.resources);
-    const problems = [];
-    if (!selected.ok) problems.push(selected.error);
-    if (job.timeouts.runSeconds > guard.maxRunSeconds) {
-      problems.push(`timeouts.runSeconds ${job.timeouts.runSeconds} exceeds the Cloudflare guard of ${guard.maxRunSeconds}s`);
-    }
-    const local = localSecretNames(job);
-    if (local.length) problems.push(`local: secrets are not available on Cloudflare Containers (${local.join(", ")}); use vault: secrets`);
-    if (!deployed) problems.push("Cloudflare container image is not configured: set the HC_CONTAINER_IMAGE secret to the registry.cloudflare.com digest deployed with hc-core");
-    else if (!imagesMatch(job.image, deployed)) problems.push("job image does not match the deployed Cloudflare container image (push the digest, then set the job image and HC_CONTAINER_IMAGE to it)");
-    if (!options.starter && selected.ok && !env[selected.binding]) {
-      problems.push(`instance type ${selected.name} is not deployed (binding ${selected.binding} is missing on hc-core)`);
-    }
-    const held = selected.ok ? selected : {
-      name: typeof job.resources.instanceType === "string" ? job.resources.instanceType : "basic",
-      vcpu: null,
-      memoryMiB: job.resources.memoryMiB,
-      diskMiB: job.resources.diskMiB,
-    };
-    const claimed = await claimRun(db, run, job, held, now);
-    if (!claimed) continue;
+    const selected = selectInstanceType(job.resources, deployed);
+    const problems = startProblems(job, selected, guard, image);
+    const held = selected.ok ? selected : { name: job.resources.instanceType ?? "basic", vcpu: null, memoryMiB: job.resources.memoryMiB, diskMiB: job.resources.diskMiB };
+    if (!await claimRun(db, run, job, held, image, now)) continue;
     if (problems.length) {
       await failRun(db, run.id, problems[0], now);
       summary.failed += 1;
@@ -336,32 +427,43 @@ export async function dispatchCloudflare(env, now, options = {}) {
       values = opened.values;
     }
     const extra = parse(run.parameters_json, []) ?? [];
-    const entrypoint = containerCommand(job, Array.isArray(extra) ? extra.filter((item) => typeof item === "string") : []);
+    const command = containerCommand(job, Array.isArray(extra) ? extra.filter((item) => typeof item === "string") : []);
     const spec = {
       runId: run.id,
+      jobId: job.id,
       binding: selected.binding,
       instanceType: selected.name,
-      deadlineAt: now + job.timeouts.runSeconds * 1000 + TIMEOUT_GRACE_MS,
+      // The object settles a run at its own deadline; timeOutRuns' grace after it is the backstop when the object cannot.
+      deadlineAt: now + job.timeouts.runSeconds * 1000,
       memoryLimitBytes: selected.memoryMiB * 1048576,
       env: { ...job.env, ...secretEnv(job, values) },
+      secretValues: Object.values(values).filter((value) => typeof value === "string"),
       enableInternet: job.network !== "none",
-      ...(entrypoint ? { entrypoint } : {}),
+      command,
     };
     try {
       await db.prepare("UPDATE runs SET started_at = ?1 WHERE id = ?2 AND started_at IS NULL AND machine_id = ?3").bind(now, run.id, CLOUDFLARE_MACHINE_ID).run();
-      await starter.start(spec);
-      const running = await db.prepare(`UPDATE runs SET state = 'running', updated_at = ?1 WHERE id = ?2 AND state = 'claimed' AND machine_id = ?3`)
-        .bind(now, run.id, CLOUDFLARE_MACHINE_ID).run();
+      const started = await starter.start(spec);
+      const digest = started?.digest ?? null;
+      const running = await db.prepare(`UPDATE runs SET state = 'running', updated_at = ?1, image_digest = COALESCE(?4, image_digest)
+        WHERE id = ?2 AND state = 'claimed' AND machine_id = ?3`).bind(now, run.id, CLOUDFLARE_MACHINE_ID, digest).run();
       if (running.meta.changes === 1) summary.started += 1;
       room -= 1;
     } catch (error) {
+      if (startIsTransient(error)) {
+        // No instance free yet (a container that was just cancelled or timed out may still be going): wait for a later minute.
+        await unclaim(db, run.id, now);
+        summary.leftDue += 1;
+        room = 0;
+        continue;
+      }
       const exitCode = exitCodeFromError(error);
       if (exitCode !== null) await recordContainerStop(db, run.id, { exitCode }, now);
       else await failRun(db, run.id, safeError(error), now);
       summary.failed += 1;
     }
   }
-  await touchExecutor(db, row, now, guard, await usage());
+  await touchExecutor(db, row, now, guard, await usage(), { deployed, image });
   return summary;
 }
 

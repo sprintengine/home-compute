@@ -22,13 +22,16 @@
       "migrations_dir": "migrations"
     }
   ],
-  // Container stdout and the cron's own logs. Workers Logs is billed; see docs/cloudflare-containers.md.
-  "observability": { "enabled": true, "logs": { "enabled": true, "invocation_logs": true }, "traces": { "enabled": true } },
-  // One container class per instance type. `basic` is the only one deployed, so a trial cannot
-  // start a larger size by accident. The image is a placeholder Dockerfile, not a workload:
-  // before a real job, push linux/amd64 and set this `image` to the same
-  // registry.cloudflare.com/<account>/<repo>@sha256:… digest as the HC_CONTAINER_IMAGE secret.
-  // max_instances is the hard cap and must be raised together with settings.cloudflare.maxConcurrent.
+  // The cron's logs and each container's full output (the dashboard keeps the last 500 lines).
+  // Workers Paid includes 20 million log events a month; traces stay off.
+  "observability": { "enabled": true, "logs": { "enabled": true, "invocation_logs": true } },
+  // Cloudflare Containers (docs/cloudflare-containers.md). One class per instance type, each with
+  // the same image; a run goes to the smallest deployed class its memory and disk fit. Only `basic`
+  // (1/4 vCPU, 1 GiB, 4 GB) is deployed: to add one, copy the entry and its binding, for example
+  // HcContainerLite / HC_CONTAINER_LITE / "lite", and add the class to a new migration tag.
+  // `image` and vars.HC_CONTAINER_IMAGE must name the same registry.cloudflare.com digest:
+  // cloud/scripts/set-container-image.sh writes both, then `npx wrangler deploy -c wrangler.core.jsonc`.
+  // max_instances is the hard cap; keep it equal to settings.cloudflare.maxConcurrent (default 1).
   "containers": [
     {
       "class_name": "HcContainerBasic",
@@ -40,11 +43,14 @@
   "durable_objects": {
     "bindings": [{ "name": "HC_CONTAINER_BASIC", "class_name": "HcContainerBasic" }]
   },
-  "migrations": [{ "tag": "v1-cloudflare-containers", "new_sqlite_classes": ["HcContainerBasic"] }]
+  "migrations": [{ "tag": "v1-cloudflare-containers", "new_sqlite_classes": ["HcContainerBasic"] }],
+  "vars": {
+    // Empty until a real image is deployed: until then a Cloudflare job's run fails with how to set it.
+    "HC_CONTAINER_IMAGE": ""
+  }
   // Secrets (wrangler secret put NAME -c wrangler.core.jsonc), kept out of this file:
   //   VAULT_PRIVATE_KEY    the vault's RSA-OAEP private key (PKCS #8, base64); only hc-core can open secrets.
   //   ALERT_EMAIL_TO       the verified Email Routing destination alerts go to (the owner).
   //   ALERT_EMAIL_FROM     the sender, on a zone with Email Routing enabled.
   //   DASHBOARD_URL        hc-web's URL, linked from alert emails.
-  //   HC_CONTAINER_IMAGE   registry.cloudflare.com/<account>/<repo>@sha256:… of the image deployed above.
 }

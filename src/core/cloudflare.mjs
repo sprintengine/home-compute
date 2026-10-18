@@ -3,9 +3,10 @@
 // starts one container per run, and writes the same `runs` rows a machine does.
 //
 // Instance sizes and prices are Cloudflare's published figures (Containers
-// limits, updated 2026-10-12; pricing, 2026-10-05). `basic` is the cheap
-// default. It is a default-scheduling-policy size: one image per container
-// class, chosen at deploy, not per run.
+// limits and pricing, October 2026). Below one vCPU there are only the named
+// sizes `lite` and `basic`; a custom size starts at 1 vCPU and 3 GiB. Each
+// size is a container class of its own (one image, one instance type), and a
+// run goes to the smallest deployed class its memory and disk fit.
 
 export const CLOUDFLARE_RUNTIME = "cloudflare-container";
 /** 26 alphanumeric characters after `m_`, so it matches the dashboard's machine route. */
@@ -14,16 +15,18 @@ export const CLOUDFLARE_MACHINE_NAME = "cloudflare";
 
 /** The same grace `timeOutRuns` adds after `timeouts.runSeconds`. */
 export const TIMEOUT_GRACE_MS = 300_000;
-/** Two agent leases. One missed minute must not mark a live container `lost`. */
+/** Renewed by the run's Durable Object on every check (each cron minute and each alarm), and only while the container answers. */
 export const CLOUDFLARE_LEASE_MS = 180_000;
 /** Product cap. A container class alarm keeps the Durable Object awake in short slices; this is the longest run we will start. */
 export const ABSOLUTE_MAX_RUN_SECONDS = 1200;
 export const DEFAULT_GUARD = { maxConcurrent: 1, maxRunSeconds: ABSOLUTE_MAX_RUN_SECONDS };
+/** How long a finished container waits for hc-core to read its result before it exits on its own. */
+export const RESULT_HOLD_SECONDS = 300;
 
 /**
- * Provisioned shape of each instance type. `diskMiB` treats Cloudflare's
- * "4 GB" as 4096 MiB. `vcpu` is what the run must fit inside, not a promise
- * of exclusive CPU (Cloudflare bills active CPU, and these sizes share a core).
+ * Provisioned shape of each instance type, smallest first. `diskMiB` treats
+ * Cloudflare's "4 GB" as 4096 MiB. `vcpu` is shared below one: Cloudflare
+ * bills active CPU, so it is not used to choose a size.
  */
 export const INSTANCE_TYPES = {
   lite: { vcpu: 1 / 16, memoryMiB: 256, diskMiB: 2048, diskGB: 2, memoryGiB: 0.25 },
@@ -34,7 +37,7 @@ export const INSTANCE_TYPES = {
   "standard-4": { vcpu: 4, memoryMiB: 12288, diskMiB: 20480, diskGB: 20, memoryGiB: 12 },
 };
 
-/** Worker binding for each type. Only `HC_CONTAINER_BASIC` ships in wrangler until the owner adds another. */
+/** Worker binding for each type. A type is deployed when hc-core has its binding (wrangler.core.jsonc). */
 export const INSTANCE_BINDINGS = {
   lite: "HC_CONTAINER_LITE",
   basic: "HC_CONTAINER_BASIC",
@@ -66,31 +69,40 @@ export function targetsCloudflare(job) {
   return job?.placement?.requireLabels?.runtime === CLOUDFLARE_RUNTIME;
 }
 
+/** The instance types hc-core can start: those whose binding `env` has. */
+export function deployedInstanceTypes(env) {
+  return Object.keys(INSTANCE_TYPES).filter((name) => Boolean(env?.[INSTANCE_BINDINGS[name]]));
+}
+
 /**
- * The instance type a job asked for (`resources.instanceType`, else `basic`).
- * Fails closed when the job's CPU, memory or disk do not fit that type: a
- * job left at the defaults (1 CPU, 2 GiB) must not be silently moved onto a
- * larger, more expensive size.
+ * The instance type for a job: `resources.instanceType` when it names one,
+ * else the smallest deployed type that holds the job's memory and disk. CPU
+ * does not choose: the sizes below one vCPU share a core and only active CPU
+ * is billed, so a CPU-light job asking for "1" still runs on `basic`. Fails
+ * closed when nothing deployed fits, rather than reaching for a bigger size.
  */
-export function selectInstanceType(resources) {
-  const name = resources?.instanceType ?? "basic";
-  const type = INSTANCE_TYPES[name];
-  if (!type) {
-    return { ok: false, error: `resources.instanceType ${JSON.stringify(name)} is unknown; use ${Object.keys(INSTANCE_TYPES).join(", ")}` };
-  }
-  const cpus = resources?.cpus ?? 1;
+export function selectInstanceType(resources, deployed = ["basic"]) {
   const memoryMiB = resources?.memoryMiB ?? 2048;
   const diskMiB = resources?.diskMiB ?? 2048;
-  if (cpus > type.vcpu + 1e-9) {
-    return { ok: false, error: `resources.cpus ${cpus} exceeds the ${name} instance (${type.vcpu} vCPU). Set instanceType and resources that fit; the run is not moved to a larger size.` };
+  const fits = (name) => memoryMiB <= INSTANCE_TYPES[name].memoryMiB && diskMiB <= INSTANCE_TYPES[name].diskMiB;
+  const chosen = (name) => ({ ok: true, name, binding: INSTANCE_BINDINGS[name], ...INSTANCE_TYPES[name] });
+  const named = resources?.instanceType;
+  if (named !== undefined && named !== null) {
+    if (!INSTANCE_TYPES[named]) {
+      return { ok: false, error: `resources.instanceType ${JSON.stringify(named)} is unknown; use ${Object.keys(INSTANCE_TYPES).join(", ")}` };
+    }
+    if (!deployed.includes(named)) return { ok: false, error: `instance type ${named} is not deployed on hc-core (deployed: ${deployed.join(", ") || "none"})` };
+    if (!fits(named)) {
+      const type = INSTANCE_TYPES[named];
+      return { ok: false, error: `the job's ${memoryMiB} MiB memory and ${diskMiB} MiB disk do not fit ${named} (${type.memoryMiB} MiB, ${type.diskMiB} MiB)` };
+    }
+    return chosen(named);
   }
-  if (memoryMiB > type.memoryMiB) {
-    return { ok: false, error: `resources.memoryMiB ${memoryMiB} exceeds the ${name} instance (${type.memoryMiB} MiB).` };
+  const name = Object.keys(INSTANCE_TYPES).find((candidate) => deployed.includes(candidate) && fits(candidate));
+  if (!name) {
+    return { ok: false, error: `no deployed instance type holds ${memoryMiB} MiB memory and ${diskMiB} MiB disk (deployed: ${deployed.join(", ") || "none"}); lower the job's resources or deploy a larger class` };
   }
-  if (diskMiB > type.diskMiB) {
-    return { ok: false, error: `resources.diskMiB ${diskMiB} exceeds the ${name} instance (${type.diskMiB} MiB).` };
-  }
-  return { ok: true, name, binding: INSTANCE_BINDINGS[name], ...type };
+  return chosen(name);
 }
 
 /** `sha256:<64 hex>` from an `image@sha256:…` reference, or null. */
@@ -99,22 +111,109 @@ export function imageDigest(ref) {
   return match ? `sha256:${match[1].toLowerCase()}` : null;
 }
 
+/** An image reference's last path segment, without registry, tag or digest: `wingfoil-forecast`. */
+export function imageRepository(ref) {
+  if (typeof ref !== "string" || !ref) return null;
+  const path = ref.replace(/@sha256:[0-9a-f]+$/i, "");
+  const last = path.slice(path.lastIndexOf("/") + 1);
+  return last.replace(/:[^:]*$/, "").toLowerCase() || null;
+}
+
 /**
- * A job may name the deployed image exactly, or any reference with the same
- * digest (the ghcr name and the Cloudflare registry name of one push).
+ * Whether a job may run on the deployed image. A job that pins a digest must
+ * name the deployed one. A job that names a tag (`…/wingfoil-forecast:production`)
+ * runs whatever version of that repository is deployed: Cloudflare cannot
+ * pull the tag itself, so the deploy is what moves it.
  */
 export function imagesMatch(jobImage, deployed) {
   if (typeof jobImage !== "string" || typeof deployed !== "string" || !deployed) return false;
   if (jobImage === deployed) return true;
-  const left = imageDigest(jobImage);
-  const right = imageDigest(deployed);
-  return Boolean(left && right && left === right);
+  const wanted = imageDigest(jobImage);
+  if (wanted) return wanted === imageDigest(deployed);
+  const repository = imageRepository(jobImage);
+  return Boolean(repository && repository === imageRepository(deployed));
 }
 
-/** What the container runs. Cloudflare has one `entrypoint` field and no separate command, so args replace the image entrypoint when set. Empty means the image default. */
+/** What the job runs: its entrypoint, args and the run's extra parameters. Empty means the image default, which the log wrapper cannot run. */
 export function containerCommand(job, extra = []) {
   const parts = [...(job?.entrypoint ?? []), ...(job?.args ?? []), ...extra];
   return parts.length ? parts : null;
+}
+
+/** Where the wrapper keeps a run's output and exit code inside the container. */
+export const RESULT_DIR = "/tmp/hc";
+
+/**
+ * The container's entrypoint: the job under `sh`, its output copied to
+ * <dir>/log (and on to Workers Logs), its exit code written to <dir>/exit,
+ * then a short hold so hc-core can read both before the container goes.
+ * Needs `sh`, `tee`, `mkdir`, `mv` and `sleep` in the image.
+ */
+export function wrappedEntrypoint(command, holdSeconds = RESULT_HOLD_SECONDS, dir = RESULT_DIR) {
+  const script = [
+    "d=\"$1\"; shift",
+    "mkdir -p \"$d\"",
+    "{ \"$@\"; echo $? > \"$d/exit.part\"; mv \"$d/exit.part\" \"$d/exit\"; } 2>&1 | tee \"$d/log\"",
+    `exec sleep ${Math.max(1, Math.round(holdSeconds))}`,
+  ].join("; ");
+  return ["sh", "-c", script, "hc-run", dir, ...command];
+}
+
+/** An exec that returns once the job has written its exit code. */
+export function waitCommand(dir = RESULT_DIR) {
+  return ["sh", "-c", "while [ ! -f \"$1/exit\" ]; do sleep 1; done", "hc-wait", dir];
+}
+
+/**
+ * An exec that prints what hc-core reads about a run, in sections headed
+ * `@@<nonce> <name>` so the job's own output cannot be mistaken for one.
+ */
+export function probeCommand(nonce, dir = RESULT_DIR) {
+  const script = [
+    "n=\"$1\"; d=\"$2\"",
+    "echo \"@@$n exit\"; cat \"$d/exit\" 2>/dev/null",
+    "echo \"@@$n memory\"; cat /sys/fs/cgroup/memory.peak 2>/dev/null",
+    "echo \"@@$n cpu\"; grep usage_usec /sys/fs/cgroup/cpu.stat 2>/dev/null",
+    "echo \"@@$n size\"; wc -c < \"$d/log\" 2>/dev/null; wc -l < \"$d/log\" 2>/dev/null",
+    "echo \"@@$n reports\"; grep -E '^[[:space:]]*[{].*\"event\"[[:space:]]*:' \"$d/log\" 2>/dev/null | tail -n 50",
+    "echo \"@@$n tail\"; tail -n 500 \"$d/log\" 2>/dev/null",
+    "true",
+  ].join("; ");
+  return ["sh", "-c", script, "hc-probe", nonce, dir];
+}
+
+/** The probe's output as numbers and lines. A field the probe could not read is null. */
+export function parseProbe(text, nonce) {
+  const sections = {};
+  let current = null;
+  const marker = `@@${nonce} `;
+  for (const line of String(text ?? "").replace(/\r\n?/g, "\n").split("\n")) {
+    if (line.startsWith(marker)) {
+      current = line.slice(marker.length).trim();
+      sections[current] = [];
+    } else if (current) {
+      sections[current].push(line);
+    }
+  }
+  const number = (name, index = 0) => {
+    const value = (sections[name] ?? []).map((line) => line.trim()).filter(Boolean)[index];
+    return value !== undefined && /^-?\d+$/.test(value) ? Number(value) : null;
+  };
+  const cpu = (sections.cpu ?? []).join("\n").match(/usage_usec\s+(\d+)/);
+  const lines = (name) => {
+    const kept = [...(sections[name] ?? [])];
+    while (kept.length && kept.at(-1) === "") kept.pop();
+    return kept;
+  };
+  return {
+    exitCode: number("exit"),
+    peakMemoryBytes: number("memory"),
+    cpuMicroseconds: cpu ? Number(cpu[1]) : null,
+    bytesTotal: number("size", 0),
+    linesTotal: number("size", 1),
+    reportLines: lines("reports"),
+    tailLines: lines("tail"),
+  };
 }
 
 export function localSecretNames(job) {
@@ -138,17 +237,18 @@ export function normaliseGuard(value) {
 }
 
 /**
- * What a container exit means for the run row. Timeout wins over exit 137:
- * we SIGKILL at the deadline, and that signal is not evidence of an OOM.
- * Otherwise exit 137, or a cgroup peak at the instance memory limit, is OOM.
+ * What a container exit means for the run row. Timeout and cancel win: we
+ * kill at the deadline, and that signal is not evidence of an OOM. Otherwise
+ * exit 137 is OOM, and so is a failing exit with the cgroup peak at the
+ * limit. A clean exit is never OOM: page cache counts towards the peak.
  */
 export function interpretExit({ exitCode = null, peakMemoryBytes = null, memoryLimitBytes = null, stopReason = null } = {}) {
   if (stopReason === "timeout") return { timedOut: true, oomKilled: false, exitCode, failed: false, cancelled: false };
   if (stopReason === "cancel") return { timedOut: false, oomKilled: false, exitCode, failed: false, cancelled: true };
   const numeric = typeof exitCode === "number";
-  const oom = exitCode === 137 || (
-    typeof peakMemoryBytes === "number" && typeof memoryLimitBytes === "number" && memoryLimitBytes > 0 && peakMemoryBytes >= memoryLimitBytes
-  );
+  const atLimit = typeof peakMemoryBytes === "number" && typeof memoryLimitBytes === "number" && memoryLimitBytes > 0
+    && peakMemoryBytes >= memoryLimitBytes;
+  const oom = exitCode === 137 || (numeric && exitCode !== 0 && atLimit);
   return { timedOut: false, oomKilled: oom, exitCode: numeric ? exitCode : null, failed: !numeric, cancelled: false };
 }
 
@@ -158,28 +258,27 @@ export function exitCodeFromError(error) {
   return match ? Number(match[1]) : null;
 }
 
-/** `memory.peak` and `cpu.stat` text from a best-effort cgroup read. Missing fields are omitted. */
-export function parseCgroup(text) {
-  const result = {};
-  if (typeof text !== "string" || !text) return result;
-  const memory = text.match(/memory\.peak\s+(\d+)/);
-  if (memory) result.peakMemoryBytes = Number(memory[1]);
-  const usage = text.match(/usage_usec\s+(\d+)/);
-  if (usage) result.cpuMicroseconds = Number(usage[1]);
-  return result;
+/** A start that failed for want of capacity, which a later minute may have: the run goes back to `due`. */
+export function startIsTransient(error) {
+  return /no container instance that can be provided|too many containers per second|max(imum)?[ _]instances|capacity/i
+    .test(String(error?.message ?? error));
 }
 
 /**
- * What the Durable Object should do on a tick. `lost` destroys the container
- * and does not complete the run (a SIGKILL must not become a fake OOM that
- * races the retry). A natural exit while `lost` is not this case: that path
- * has no stop reason and still completes, recovered.
+ * What the run's Durable Object does on a check, from the run row's state,
+ * the deadline and whether the job has written its exit code:
+ * - `stop` without `settle`: the row already ended (lost, cancelled,
+ *   finished elsewhere); kill the container. A lost run is not completed
+ *   here: its retry decides, and a SIGKILL must not become a fake OOM.
+ * - `settle`: complete the row from the container (exit or timeout), then kill it.
+ * - `renew`: still running; renew the lease and refresh the log tail.
  */
-export function containerWatch({ state, deadlineAt }, now) {
-  if (state === "lost") return { action: "destroy", stopReason: "lost", complete: false };
-  if (state === "cancelled") return { action: "destroy", stopReason: "cancel", complete: false };
-  if (TERMINAL_STATES.has(state)) return { action: "destroy", complete: false };
-  if (typeof deadlineAt === "number" && now >= deadlineAt) return { action: "timeout", stopReason: "timeout", complete: true };
+export function watchDecision({ state, deadlineAt, exitCode = null }, now) {
+  if (state === "lost") return { action: "stop", stopReason: "lost", settle: false };
+  if (state === "cancelled") return { action: "stop", stopReason: "cancel", settle: false, keepLog: true };
+  if (TERMINAL_STATES.has(state)) return { action: "stop", settle: false, keepLog: true };
+  if (typeof exitCode === "number") return { action: "settle", settle: true, stopReason: null };
+  if (typeof deadlineAt === "number" && now >= deadlineAt) return { action: "settle", settle: true, stopReason: "timeout" };
   return { action: "renew", leaseExpiresAt: now + CLOUDFLARE_LEASE_MS };
 }
 

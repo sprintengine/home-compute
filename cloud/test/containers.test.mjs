@@ -1,15 +1,17 @@
-// The Cloudflare Containers executor: claiming, guardrails, secrets, and the
-// same run rows a machine produces. The container class is not started here;
-// a fake starter stands in for the Durable Object.
+// The Cloudflare Containers executor: claiming, sizing, image matching,
+// guardrails, secrets, and the same run rows, logs and reports a machine
+// produces. The container class is not started here; a fake starter stands
+// in for the Durable Object, and a probe (what the object reads from the
+// container) is built by hand.
 import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { CLOUDFLARE_MACHINE_ID } from "../../src/core/cloudflare.mjs";
-import { dispatchCloudflare, getContainers, recordContainerStop } from "../src/containers.mjs";
+import { dispatchCloudflare, getContainers, recordContainerStop, runningTail } from "../src/containers.mjs";
 import { call, createJob, cron, enrolMachine, mockCertificates, resetDatabase, rows, syncAs } from "./helpers.mjs";
 
 const DIGEST = "ab".repeat(32);
-const IMAGE = `registry.cloudflare.com/acct/job@sha256:${DIGEST}`;
-const GHCR = `ghcr.io/example/job@sha256:${DIGEST}`;
+const IMAGE = `registry.cloudflare.com/acct/wingfoil-forecast@sha256:${DIGEST}`;
+const TAGGED = "ghcr.io/sprintengine/wingfoil-forecast:production";
 const NOW = Date.parse("2026-10-18T12:00:00Z");
 
 let certificates;
@@ -21,10 +23,11 @@ afterEach(() => certificates.mockRestore());
 
 function cloudJob(overrides = {}) {
   return {
-    image: IMAGE,
+    image: TAGGED,
+    entrypoint: ["python", "/app/force5/ingest/worker.py"],
     schedule: null,
     placement: { requireLabels: { runtime: "cloudflare-container" } },
-    resources: { instanceType: "basic", cpus: 0.25, memoryMiB: 1024, diskMiB: 4096 },
+    resources: { cpus: 1, memoryMiB: 1024, diskMiB: 4096 },
     timeouts: { runSeconds: 600 },
     ...overrides,
   };
@@ -37,14 +40,32 @@ async function due(id, overrides = {}) {
   return response.body.runId;
 }
 
-function starter() {
+function starter(answer = async () => ({ digest: `sha256:${DIGEST}` })) {
   const started = [];
-  return { started, starter: { async start(spec) { started.push(spec); } } };
+  return { started, starter: { async start(spec) { started.push(spec); return answer(spec); } } };
+}
+
+function probe({ exitCode = null, lines = [], peakMemoryBytes = null } = {}) {
+  return {
+    exitCode,
+    peakMemoryBytes,
+    cpuMicroseconds: 2_000_000,
+    bytesTotal: lines.join("\n").length,
+    linesTotal: lines.length,
+    reportLines: lines.filter((line) => line.trim().startsWith("{")),
+    tailLines: lines,
+  };
 }
 
 async function stateOf(runId) {
-  const [row] = await rows("SELECT state, error, exit_code, oom_killed, timed_out, machine_id, metrics_json, started_at, memory_limit_bytes FROM runs WHERE id = ?", runId);
+  const [row] = await rows(`SELECT state, outcome, error, exit_code, oom_killed, timed_out, machine_id, metrics_json, started_at,
+    memory_limit_bytes, image_ref, image_digest, reports_json FROM runs WHERE id = ?`, runId);
   return { ...row, metrics: row.metrics_json ? JSON.parse(row.metrics_json) : null };
+}
+
+async function logOf(runId) {
+  const [row] = await rows("SELECT tail, final, lines_total FROM run_logs WHERE run_id = ?", runId);
+  return row ?? null;
 }
 
 describe("Cloudflare Containers executor", () => {
@@ -54,40 +75,72 @@ describe("Cloudflare Containers executor", () => {
     expect(await rows("SELECT id FROM machines")).toEqual([]);
   });
 
-  it("starts a fitting job on the virtual machine and keeps vault secrets out of D1", async () => {
+  it("starts a one-CPU job on basic, runs the deployed version of its tag, and keeps vault secrets out of D1", async () => {
     const secret = await call("/v1/secrets/r2-key", { method: "PUT", body: { value: "s3-secret-value" }, now: NOW });
     expect(secret.status).toBe(201);
-    const runId = await due("trial", {
-      image: GHCR,
-      env: { JOB: "trial" },
+    const runId = await due("harmonie", {
+      env: { AWS_REGION: "auto" },
       secretEnv: { AWS_SECRET_ACCESS_KEY: "vault:r2-key" },
-      args: ["--once"],
+      args: ["--models", "harmonie"],
+      report: { format: "json-lines", trackEvent: "forecast_complete", trackBy: "model" },
     });
     const fake = starter();
     const summary = await dispatchCloudflare(env, NOW, { ...fake, image: IMAGE });
     expect(summary.started).toBe(1);
-    expect(fake.started).toHaveLength(1);
     expect(fake.started[0]).toMatchObject({
-      runId, instanceType: "basic", enableInternet: true, entrypoint: ["--once"],
-      env: { JOB: "trial", AWS_SECRET_ACCESS_KEY: "s3-secret-value" },
+      runId, jobId: "harmonie", instanceType: "basic", binding: "HC_CONTAINER_BASIC", enableInternet: true,
+      command: ["python", "/app/force5/ingest/worker.py", "--models", "harmonie"],
+      env: { AWS_REGION: "auto", AWS_SECRET_ACCESS_KEY: "s3-secret-value" },
+      secretValues: ["s3-secret-value"],
     });
-    expect(fake.started[0].deadlineAt).toBe(NOW + 600_000 + 300_000);
+    // The object settles at the run's own deadline; the cron's grace after it is only the backstop.
+    expect(fake.started[0].deadlineAt).toBe(NOW + 600_000);
     const run = await stateOf(runId);
-    expect(run.state).toBe("running");
-    expect(run.machine_id).toBe(CLOUDFLARE_MACHINE_ID);
-    expect(run.memory_limit_bytes).toBe(1024 * 1048576);
+    expect(run).toMatchObject({ state: "running", machine_id: CLOUDFLARE_MACHINE_ID, memory_limit_bytes: 1024 * 1048576 });
+    expect(run.image_ref).toBe(TAGGED);
+    expect(run.image_digest).toBe(`sha256:${DIGEST}`);
     expect(run.metrics).toMatchObject({ instanceType: "basic", vcpu: 0.25, memoryMiB: 1024, diskMiB: 4096 });
     expect(JSON.stringify(await rows("SELECT metrics_json, error, parameters_json FROM runs"))).not.toContain("s3-secret-value");
-    const [machine] = await rows("SELECT name, labels_json, credential_hash FROM machines");
+    const [machine] = await rows("SELECT name, labels_json, credential_hash, facts_json FROM machines");
     expect(machine.name).toBe("cloudflare");
     expect(JSON.parse(machine.labels_json).runtime).toBe("cloudflare-container");
     expect(machine.credential_hash).toMatch(/^[0-9a-f]{64}$/);
-    const settled = await recordContainerStop(env.DB, runId, { exitCode: 0, peakMemoryBytes: 1000 }, NOW + 10_000);
+    expect(JSON.parse(machine.facts_json)).toMatchObject({ image: IMAGE, imageDigest: `sha256:${DIGEST}`, instanceTypes: ["basic"] });
+
+    // The running tail the object keeps current, redacted of the run's secrets.
+    const running = probe({ lines: ["fetching", "key=s3-secret-value"] });
+    await runningTail(env.DB, runId, running, ["s3-secret-value"], NOW + 5_000, { lines: 200, bytes: 32 * 1024 }).run();
+    expect((await logOf(runId)).tail).toBe("fetching\nkey=<redacted>");
+
+    const finished = probe({
+      exitCode: 0,
+      peakMemoryBytes: 1024 * 1048576,
+      lines: ["fetching", '{"event": "forecast_complete", "model": "harmonie", "run": "2026101806"}', "done s3-secret-value"],
+    });
+    const settled = await recordContainerStop(env.DB, runId, { exitCode: 0, probe: finished, secretValues: ["s3-secret-value"],
+      peakMemoryBytes: finished.peakMemoryBytes, cpuSeconds: 2 }, NOW + 10_000);
     expect(settled.state).toBe("succeeded");
     const done = await stateOf(runId);
-    expect(done.exit_code).toBe(0);
-    expect(done.metrics.containerSeconds).toBe(10);
-    expect(done.metrics.instanceType).toBe("basic");
+    // Peak at the limit with a clean exit is page cache, not an OOM.
+    expect(done).toMatchObject({ exit_code: 0, oom_killed: 0, outcome: "published" });
+    expect(done.metrics).toMatchObject({ containerSeconds: 10, instanceType: "basic" });
+    expect(JSON.parse(done.reports_json)[0]).toMatchObject({ event: "forecast_complete", model: "harmonie" });
+    const log = await logOf(runId);
+    expect(log.final).toBe(1);
+    expect(log.tail).toContain("done <redacted>");
+    expect(log.tail).not.toContain("s3-secret-value");
+    const [state] = await rows("SELECT published_json FROM schedule_state WHERE job_id = 'harmonie'");
+    expect(state.published_json).toContain("2026101806");
+  });
+
+  it("takes the error from the job's output when it fails", async () => {
+    const runId = await due("icon");
+    await dispatchCloudflare(env, NOW, { ...starter(), image: IMAGE });
+    const failing = probe({ exitCode: 1, lines: ["Traceback (most recent call last):", '  File "worker.py", line 3', "ValueError: no GRIB"] });
+    await recordContainerStop(env.DB, runId, { exitCode: 1, probe: failing, secretValues: [] }, NOW + 5_000);
+    const run = await stateOf(runId);
+    expect(run).toMatchObject({ state: "failed", exit_code: 1, oom_killed: 0 });
+    expect(run.error).toBe("ValueError: no GRIB");
   });
 
   it("leaves a second job due when the concurrency guard is full", async () => {
@@ -99,28 +152,53 @@ describe("Cloudflare Containers executor", () => {
     expect((await stateOf(second)).state).toBe("due");
   });
 
-  it("fails closed when resources, duration or a local secret do not fit", async () => {
-    const oversized = await due("big", { resources: { cpus: 1, memoryMiB: 2048, diskMiB: 2048 } });
+  it("puts a run back to due when no instance is free yet, and starts it the next minute", async () => {
+    const runId = await due("busy");
+    let full = true;
+    const fake = starter(async () => {
+      if (full) throw new Error("there is no container instance that can be provided to this durable object");
+      return {};
+    });
+    const first = await dispatchCloudflare(env, NOW, { ...fake, image: IMAGE });
+    expect(first).toMatchObject({ started: 0, failed: 0, leftDue: 1 });
+    expect(await stateOf(runId)).toMatchObject({ state: "due", machine_id: null, started_at: null });
+    full = false;
+    const second = await dispatchCloudflare(env, NOW + 60_000, { ...fake, image: IMAGE });
+    expect(second.started).toBe(1);
+    expect((await stateOf(runId)).state).toBe("running");
+  });
+
+  it("fails closed, with the reason, when a job cannot run on Cloudflare", async () => {
+    const big = await due("big", { resources: { cpus: 1, memoryMiB: 2048, diskMiB: 2048 } });
+    const disk = await due("disk", { resources: { cpus: 1, memoryMiB: 512, diskMiB: 12288 } });
     const tooLong = await due("long", { timeouts: { runSeconds: 1300 } });
     const local = await due("local-secret", { secretEnv: { TOKEN: "local:TOKEN" } });
+    const bare = await due("bare", { entrypoint: null });
+    const named = await due("std", { resources: { instanceType: "standard-1", cpus: 0.5, memoryMiB: 4096, diskMiB: 8192 } });
+    const fake = starter();
+    await call("/v1/settings", { method: "PATCH", body: { cloudflare: { maxConcurrent: 10 } }, now: NOW });
+    await dispatchCloudflare(env, NOW, { ...fake, image: IMAGE });
+    expect(fake.started).toEqual([]);
+    expect((await stateOf(big)).error).toMatch(/no deployed instance type holds 2048 MiB memory/);
+    expect((await stateOf(disk)).error).toMatch(/12288 MiB disk/);
+    expect((await stateOf(tooLong)).error).toMatch(/1200/);
+    expect((await stateOf(local)).error).toMatch(/local:/);
+    expect((await stateOf(bare)).error).toMatch(/needs an entrypoint/);
+    expect((await stateOf(named)).error).toMatch(/standard-1 is not deployed/);
+  });
+
+  it("fails a job whose image is not the one deployed, or when none is", async () => {
+    const other = await due("other", { image: "ghcr.io/sprintengine/other:production" });
+    const pinned = await due("pinned", { image: `ghcr.io/sprintengine/wingfoil-forecast@sha256:${"cd".repeat(32)}` });
+    await call("/v1/settings", { method: "PATCH", body: { cloudflare: { maxConcurrent: 5 } }, now: NOW });
     const fake = starter();
     await dispatchCloudflare(env, NOW, { ...fake, image: IMAGE });
     expect(fake.started).toEqual([]);
-    expect((await stateOf(oversized)).error).toMatch(/exceeds the basic instance/);
-    expect((await stateOf(tooLong)).error).toMatch(/1200/);
-    expect((await stateOf(local)).error).toMatch(/local:/);
-  });
-
-  it("fails a mismatched image and an undeployed instance type without starting", async () => {
-    const mismatch = await due("mismatch");
-    const fake = starter();
-    await dispatchCloudflare(env, NOW, { ...fake, image: `registry.cloudflare.com/acct/other@sha256:${"cd".repeat(32)}` });
-    expect(fake.started).toEqual([]);
-    expect((await stateOf(mismatch)).error).toMatch(/does not match/);
-    const undeployed = await due("std", { resources: { instanceType: "standard-1", cpus: 0.5, memoryMiB: 4096, diskMiB: 8192 } });
-    const summary = await dispatchCloudflare(env, NOW, { image: IMAGE });
-    expect(summary.failed).toBeGreaterThanOrEqual(1);
-    expect((await stateOf(undeployed)).error).toMatch(/not deployed/);
+    expect((await stateOf(other)).error).toMatch(/is not the image deployed on Cloudflare/);
+    expect((await stateOf(pinned)).error).toMatch(/is not the image deployed on Cloudflare/);
+    const none = await due("none");
+    await dispatchCloudflare(env, NOW, { ...fake, image: "" });
+    expect((await stateOf(none)).error).toMatch(/set-container-image\.sh/);
   });
 
   it("leaves a run due when its vault secret is missing or not for this executor", async () => {
@@ -168,35 +246,80 @@ describe("Cloudflare Containers executor", () => {
     const revoked = await dispatchCloudflare(env, NOW + 1000, { ...fake, image: IMAGE });
     expect(revoked.revoked).toBe(true);
     expect((await stateOf(third)).state).toBe("due");
-    const [row] = await rows("SELECT revoked_at FROM machines WHERE id = ?", CLOUDFLARE_MACHINE_ID);
-    expect(row.revoked_at).toBe(NOW);
   });
 
-  it("times out and loses container runs with the same rules as a machine, and reports container-seconds", async () => {
+  it("does not renew a lease from the cron: a container that stops answering is lost, and a stuck claim does not block the job", async () => {
+    const runId = await due("quiet");
+    await dispatchCloudflare(env, NOW, { ...starter(), image: IMAGE });
+    // No object renewed it (the container went): three minutes on, the run is lost like a machine's.
+    await cron(NOW + 4 * 60_000);
+    expect((await stateOf(runId)).state).toBe("lost");
+    // A claim the cron never got past (it died between claim and start) runs out too.
+    const stuck = await due("stuck");
+    await env.DB.prepare(`UPDATE runs SET state = 'claimed', machine_id = ?1, lease_expires_at = ?2, claimed_at = ?3 WHERE id = ?4`)
+      .bind(CLOUDFLARE_MACHINE_ID, NOW + 180_000, NOW, stuck).run();
+    await cron(NOW + 4 * 60_000);
+    expect((await stateOf(stuck)).state).toBe("lost");
+    const ignored = await recordContainerStop(env.DB, runId, { exitCode: 137, stopReason: "lost" }, NOW + 5 * 60_000);
+    expect(ignored.ignored).toBe(true);
+  });
+
+  it("asks each running run's object to check, and a just-cancelled run's too, so its container goes at once", async () => {
+    const going = await due("going");
+    await dispatchCloudflare(env, NOW, { ...starter(), image: IMAGE });
+    const cancelled = await due("cancel-me");
+    await env.DB.prepare(`UPDATE runs SET state = 'cancelled', machine_id = ?1, metrics_json = '{"instanceType":"basic"}', updated_at = ?2
+      WHERE id = ?3`).bind(CLOUDFLARE_MACHINE_ID, NOW, cancelled).run();
+    const old = await due("old");
+    await env.DB.prepare(`UPDATE runs SET state = 'cancelled', machine_id = ?1, metrics_json = '{"instanceType":"basic"}', updated_at = ?2
+      WHERE id = ?3`).bind(CLOUDFLARE_MACHINE_ID, NOW - 3_600_000, old).run();
+    const ticked = [];
+    const namespace = { getByName: (name) => ({ tick: async () => { ticked.push(name); return { running: true }; } }) };
+    await dispatchCloudflare({ ...env, HC_CONTAINER_BASIC: namespace }, NOW + 60_000, { ...starter(), image: IMAGE });
+    expect(ticked.sort()).toEqual([going, cancelled].sort());
+  });
+
+  it("times out with the same backstop as a machine, and reports container-seconds", async () => {
     const runId = await due("trial");
-    const fake = starter();
-    await dispatchCloudflare(env, NOW, { ...fake, image: IMAGE });
-    await env.DB.prepare("UPDATE runs SET started_at = ? WHERE id = ?").bind(NOW - 1_000_000, runId).run();
+    await dispatchCloudflare(env, NOW, { ...starter(), image: IMAGE });
+    await env.DB.prepare("UPDATE runs SET started_at = ?, lease_expires_at = ? WHERE id = ?").bind(NOW - 1_000_000, NOW + 600_000, runId).run();
     const summary = await cron(NOW);
     expect(summary.timedOut).toBe(1);
     const timed = await stateOf(runId);
     expect(timed.state).toBe("timed-out");
     expect(timed.metrics.containerSeconds).toBeGreaterThan(0);
     const usage = await getContainers({ db: env.DB, now: NOW });
-    expect(usage.status).toBe(200);
     const body = await usage.json();
     expect(body.containerSeconds).toBe(timed.metrics.containerSeconds);
-    expect(body.beforeIncludedAllotment).toBe(true);
     expect(body.byInstanceType.basic).toBe(body.containerSeconds);
-    const again = await due("retry-me");
-    await dispatchCloudflare(env, NOW, { ...fake, image: IMAGE });
-    await env.DB.prepare("UPDATE runs SET lease_expires_at = ? WHERE id = ?").bind(NOW - 1, again).run();
-    await cron(NOW + 60_000);
-    expect((await stateOf(again)).state).toBe("lost");
-    expect(await rows("SELECT id FROM runs WHERE job_id = 'retry-me' AND state = 'due'")).toEqual([]);
-    const ignored = await recordContainerStop(env.DB, again, { exitCode: 137, stopReason: "lost" }, NOW + 60_000);
-    expect(ignored.ignored).toBe(true);
-    expect((await stateOf(again)).state).toBe("lost");
+  });
+
+  it("settles a run at its deadline as timed out, with what it printed", async () => {
+    const runId = await due("slow");
+    await dispatchCloudflare(env, NOW, { ...starter(), image: IMAGE });
+    await recordContainerStop(env.DB, runId, { stopReason: "timeout", probe: probe({ lines: ["still going"] }), secretValues: [] }, NOW + 600_000);
+    const run = await stateOf(runId);
+    expect(run).toMatchObject({ state: "timed-out", timed_out: 1, oom_killed: 0 });
+    expect((await logOf(runId)).tail).toBe("still going");
+  });
+
+  it("asks hc-core to dispatch at once after Run now, Cancel and Retry", async () => {
+    await createJob("now", cloudJob(), { now: NOW });
+    const calls = [];
+    const waited = [];
+    const environment = { ...env, HC_CORE: { dispatch: async () => { calls.push("dispatch"); return {}; } } };
+    const ctx = { waitUntil: (promise) => waited.push(promise), passThroughOnException() {} };
+    const run = await call("/v1/jobs/now/run", { method: "POST", body: {}, now: NOW, environment, ctx });
+    expect(run.status).toBe(202);
+    await Promise.all(waited);
+    expect(calls).toEqual(["dispatch"]);
+    const cancel = await call(`/v1/runs/${run.body.runId}/cancel`, { method: "POST", now: NOW, environment, ctx });
+    expect(cancel.status).toBe(202);
+    await Promise.all(waited);
+    expect(calls).toHaveLength(2);
+    // A refused request does not nudge.
+    expect((await call("/v1/jobs/missing/run", { method: "POST", body: {}, now: NOW, environment, ctx })).status).toBe(404);
+    expect(calls).toHaveLength(2);
   });
 
   it("accepts an instance type on the job and the concurrency guard in settings", async () => {

@@ -108,7 +108,8 @@ export async function startDevStack() {
     await waitFor(`${web}/v1/health`, webProcess.output);
     // One at a time: two workerd processes opening the shared local D1 at once can fail to start with SQLITE_BUSY.
     coreProcess = startWrangler(["dev", "-c", "wrangler.core.jsonc", "--persist-to", state, "--port", String(corePort), "--ip", "127.0.0.1",
-      "--inspector-port", String(coreInspector), "--log-level", "warn", "--test-scheduled"], quiet);
+      // No Docker needed: the Cloudflare container classes are not started under wrangler dev.
+      "--inspector-port", String(coreInspector), "--log-level", "warn", "--test-scheduled", "--enable-containers=false"], quiet);
     await waitFor(`${core}/health`, coreProcess.output);
   } catch (error) {
     await close();

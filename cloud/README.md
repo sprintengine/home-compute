@@ -285,7 +285,7 @@ against the deployed database as an admin.
   writes nothing and is settled again as what it became. A late, recovered
   result never replaces a newer finished run as the job's last (nor its
   `published`), and cancels its own retry if that has not started yet.
-- **Cloudflare Containers.** After the same lease, retry and timeout steps, the cron starts runs whose placement requires `runtime=cloudflare-container`. No such job means one read and no machine row. The run is a Durable Object (`HcContainerBasic`) that outlives the cron; completion goes through the same `complete()` path, keeping the instance type in `metrics_json` and adding `containerSeconds`. Agents never claim these runs. See [docs/cloudflare-containers.md](../docs/cloudflare-containers.md).
+- **Cloudflare Containers.** After the same lease, retry and timeout steps, the cron checks the container runs going and starts runs whose placement requires `runtime=cloudflare-container` (hc-web's Run now, Cancel and Retry do the same at once, through hc-core's `Dispatcher` entrypoint). No such job means one read and no machine row. Each run is a Durable Object that outlives the cron, renews the lease only while its container answers, keeps the live log tail, and settles through the same `complete()` path with the job's output and reports. Agents never claim these runs. See [docs/cloudflare-containers.md](../docs/cloudflare-containers.md).
 - **Lost runs.** The cron marks expired leases `lost` and retries per §3.4:
   at once if the run never started, after `lostGraceSeconds` if it was
   running and the job says `onLostRunning`, at most `maxAttempts` attempts,

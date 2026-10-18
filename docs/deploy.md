@@ -63,9 +63,9 @@ of the last 7 days (`npx wrangler d1 time-travel restore home-compute
 ## 2a. Cloudflare Containers (optional, one job at a time)
 
 Not part of the deploy above. Containers need the Workers Paid plan, an image
-in Cloudflare's registry, and a job whose placement is
-`runtime=cloudflare-container`. The checklist, the `basic` size, the cost
-upper bound and the limits are [cloudflare-containers.md](cloudflare-containers.md).
+in Cloudflare's registry (`cloud/scripts/set-container-image.sh`), and a job
+whose placement is `runtime=cloudflare-container`. How a run goes, the sizes,
+the cost and the checklist are [cloudflare-containers.md](cloudflare-containers.md).
 Drain the machine named `cloudflare` to stop new container runs. Do not add an
 R2 binding; jobs keep using S3 keys as vault secrets.
 
