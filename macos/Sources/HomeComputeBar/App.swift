@@ -1,25 +1,109 @@
 import AppKit
 import SwiftUI
 
+/// Which face the app shows (`AppMode`), switched from Settings without a restart.
+@MainActor @Observable
+final class AppModel {
+    static let shared = AppModel()
+    private(set) var mode: AppMode
+
+    private init() {
+        mode = ConfigFile.load().resolvedMode
+        Log.info("mode: \(mode.rawValue)")
+    }
+
+    /// Starts the store of the current mode and stops the other's polling.
+    func activate() {
+        switch mode {
+        case .agent:
+            Store.shared.setActive(false)
+            AgentStore.shared.start()
+        case .controller:
+            AgentStore.shared.stop()
+            Store.shared.setActive(true)
+        }
+    }
+
+    func switchMode(_ new: AppMode) {
+        guard new != mode else { return }
+        var config = ConfigFile.load()
+        config.mode = new
+        do {
+            try ConfigFile.save(config)
+        } catch {
+            Log.info("could not save mode: \(error.localizedDescription)")
+        }
+        mode = new
+        activate()
+    }
+}
+
 @main
 struct HomeComputeBarApp: App {
+    @State private var app = AppModel.shared
     @State private var store = Store.shared
     @State private var control = ControlStore.shared
+    @State private var agent = AgentStore.shared
+
+    init() {
+        AppModel.shared.activate()
+    }
 
     var body: some Scene {
         MenuBarExtra {
-            PopoverView()
-                .environment(store)
-                .environment(control)
+            Group {
+                if app.mode == .agent {
+                    AgentPopoverView()
+                } else {
+                    PopoverView()
+                }
+            }
+            .environment(app)
+            .environment(store)
+            .environment(control)
+            .environment(agent)
         } label: {
-            MenuBarLabel(store: store, control: control)
+            if app.mode == .agent {
+                AgentMenuBarLabel(agent: agent)
+            } else {
+                MenuBarLabel(store: store, control: control)
+            }
         }
         .menuBarExtraStyle(.window)
 
         Settings {
-            SettingsView()
-                .environment(store)
-                .environment(control)
+            Group {
+                if app.mode == .agent {
+                    AgentSettingsTab()
+                        .frame(width: 560, height: 640)
+                } else {
+                    SettingsView()
+                }
+            }
+            .environment(app)
+            .environment(store)
+            .environment(control)
+            .environment(agent)
+        }
+    }
+}
+
+/// Agent mode's status item: a box that fills and empties while a job runs, with the job's
+/// name beside it; a pause sign, a cloud with a slash (control plane unreachable) or a warning
+/// (agent not running); a red dot for failures not yet seen in the popover.
+struct AgentMenuBarLabel: View {
+    let agent: AgentStore
+
+    var body: some View {
+        let image = Image(nsImage: StatusIcon.make(symbol: agent.iconSymbol, badge: nil, dot: agent.unseenFailures > 0))
+            .accessibilityLabel("Home Compute")
+        if let title = agent.iconTitle {
+            HStack(spacing: 2) {
+                image
+                Text(title).monospacedDigit()
+            }
+        } else {
+            image
         }
     }
 }

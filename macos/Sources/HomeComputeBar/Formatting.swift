@@ -74,6 +74,11 @@ enum Fmt {
         ByteCountFormatter.string(fromByteCount: count, countStyle: .file)
     }
 
+    /// Memory in binary units: "612 MB", "1 GB".
+    static func memory(_ count: Double) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(count), countStyle: .memory)
+    }
+
     /// "55 min", "1 h 30 min"
     static func minutes(_ seconds: Int) -> String {
         let minutes = (seconds + 59) / 60

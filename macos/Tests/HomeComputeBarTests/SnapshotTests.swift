@@ -28,7 +28,7 @@ struct SnapshotTests {
 
         func render<V: View>(_ name: String, width: CGFloat = SettingsView.contentSize.width,
                              height: CGFloat = SettingsView.contentSize.height, _ view: V) async throws {
-            let root = view.environment(store).environment(control).frame(width: width, height: height)
+            let root = view.environment(store).environment(control).environment(AppModel.shared).frame(width: width, height: height)
             let host = NSHostingView(rootView: root)
             host.frame = CGRect(x: 0, y: 0, width: width, height: height)
             let window = NSWindow(contentRect: host.frame, styleMask: [.titled], backing: .buffered, defer: false)

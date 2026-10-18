@@ -52,6 +52,7 @@ struct SettingsView: View {
 struct ConnectionTab: View {
     @Environment(Store.self) private var store
     @Environment(ControlStore.self) private var control
+    @Environment(AppModel.self) private var app
     @State private var draft = AppConfig()
     @State private var testResult: (ok: Bool, text: String)?
     @State private var saveError: String?
@@ -63,6 +64,11 @@ struct ConnectionTab: View {
 
     var body: some View {
         Form {
+            Section("Show") {
+                Picker("Mode", selection: Binding(get: { app.mode }, set: { app.switchMode($0) })) {
+                    ForEach(AppMode.allCases) { Text($0.title).tag($0) }
+                }
+            }
             Section("Controller") {
                 TextField("URL", text: $draft.url, prompt: Text(AppConfig.defaultURL))
                 SecureField("API token", text: $draft.token)

@@ -40,7 +40,21 @@ final class Store {
         signal(SIGPIPE, SIG_IGN)
         config = ConfigFile.load()
         Log.info("starting; config \(ConfigFile.url.path) -> \(config.url) (token \(config.token.isEmpty ? "missing" : "set"))")
-        start()
+        // Agent mode never asks the old controller anything.
+        if config.resolvedMode == .controller { start() }
+    }
+
+    /// Polls the controller (controller mode) or stops (agent mode).
+    func setActive(_ active: Bool) {
+        if active, pollTask == nil {
+            start()
+        } else if !active, pollTask != nil {
+            pollTask?.cancel()
+            streamTask?.cancel()
+            pollTask = nil
+            streamTask = nil
+            updateAnimation()
+        }
     }
 
     // MARK: Derived state
@@ -86,6 +100,7 @@ final class Store {
     }
 
     private func restart() {
+        guard pollTask != nil else { return }
         pollTask?.cancel()
         streamTask?.cancel()
         snapshot = nil

@@ -9,6 +9,16 @@ struct AppConfig: Equatable, Sendable {
     var notifyOnPublished = false
     /// Path of the setup script (`macmini.sh`) the control panel runs; empty = not chosen.
     var setupScript = ""
+    /// `mode` in menubar.json; nil = the agent when this Mac is enrolled, else the controller.
+    var mode: AppMode?
+    var agent = AgentSettings()
+
+    /// The mode the app runs in.
+    var resolvedMode: AppMode {
+        if let mode { return mode }
+        let enrolled = FileManager.default.fileExists(atPath: URL(filePath: agent.resolvedStateDir).appending(path: "config.json").path)
+        return enrolled ? .agent : .controller
+    }
 
     var normalized: AppConfig {
         var copy = self
@@ -38,6 +48,8 @@ enum ConfigFile {
         if let token = dict["token"] as? String { config.token = token }
         if let notify = dict["notifyOnPublished"] as? Bool { config.notifyOnPublished = notify }
         if let script = dict["setupScript"] as? String { config.setupScript = script }
+        if let mode = dict["mode"] as? String { config.mode = AppMode(rawValue: mode) }
+        if let agent = dict["agent"] as? [String: Any] { config.agent = config.agent.read(agent) }
         return config.normalized
     }
 
@@ -70,6 +82,9 @@ enum ConfigFile {
         dict["token"] = config.token
         dict["notifyOnPublished"] = config.notifyOnPublished
         dict["setupScript"] = config.setupScript.isEmpty ? nil : config.setupScript
+        dict["mode"] = config.mode?.rawValue
+        let agent = config.agent.dictionary
+        dict["agent"] = agent.count == 1 && agent["notifyOnFailure"] as? Bool == false ? nil : agent
         let data = try JSONSerialization.data(withJSONObject: dict, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
 
         // Write a 0600 temp file and rename it over the target so the token is never world-readable.

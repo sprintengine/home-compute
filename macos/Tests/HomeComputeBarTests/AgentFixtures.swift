@@ -1,0 +1,311 @@
+import Foundation
+@testable import HomeComputeBar
+
+/// Answers of the real agent's status API (agent 0.3.0 on FakeRuntime under
+/// cloud/scripts/agent-status-demo.mjs), as captured with curl.
+enum AgentFixtures {
+    static let statusRunning = #"""
+{
+ "statusApi": 1,
+ "agentVersion": "0.3.0",
+ "protocol": 1,
+ "machineId": "m_01M57SQWBSWA5PY4YPZNG56MTD",
+ "name": "status-demo",
+ "server": "http://127.0.0.1:56870",
+ "dashboardUrl": "http://127.0.0.1:56869/",
+ "connection": "online",
+ "connected": true,
+ "drain": false,
+ "paused": false,
+ "pausedAt": null,
+ "draining": false,
+ "drainingSince": null,
+ "serverDrain": false,
+ "claiming": true,
+ "notClaimingBecause": [
+  "full"
+ ],
+ "revoked": false,
+ "upgradeRequired": false,
+ "lastSyncAt": "2026-10-18T15:24:15.182Z",
+ "nextSyncAt": "2026-10-18T15:24:25.183Z",
+ "lastError": null,
+ "clockSkewMs": 2,
+ "runtime": {
+  "kind": "fake",
+  "ok": true,
+  "lastError": null,
+  "health": {
+   "docker": "ok",
+   "lastError": null
+  },
+  "vm": null,
+  "lifecycle": null,
+  "awake": null
+ },
+ "current": [
+  {
+   "id": "r_01M57SS87FAED10Y7K2QA57XEP",
+   "job": "gfs",
+   "attempt": 1,
+   "image": "ghcr.io/example/wingfoil@sha256:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+   "phase": "running",
+   "phaseSince": "2026-10-18T15:24:15.219Z",
+   "claimedAt": "2026-10-18T15:24:15.182Z",
+   "startedAt": "2026-10-18T15:24:15.198Z",
+   "elapsedMs": 4901,
+   "runningMs": 4885,
+   "cpuPct": 72,
+   "memoryBytes": 641728512,
+   "peakMemoryBytes": 641728512,
+   "memoryLimitBytes": 1073741824,
+   "waitingToReport": false
+  },
+  {
+   "id": "r_01M57SS87FZC3JNC1DX6NRSD9E",
+   "job": "wind-obs",
+   "attempt": 1,
+   "image": "ghcr.io/example/wingfoil@sha256:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+   "phase": "running",
+   "phaseSince": "2026-10-18T15:24:15.224Z",
+   "claimedAt": "2026-10-18T15:24:15.183Z",
+   "startedAt": "2026-10-18T15:24:15.203Z",
+   "elapsedMs": 4900,
+   "runningMs": 4880,
+   "cpuPct": 5,
+   "memoryBytes": 67108864,
+   "peakMemoryBytes": 67108864,
+   "memoryLimitBytes": 268435456,
+   "waitingToReport": false
+  }
+ ],
+ "runs": [
+  {
+   "id": "r_01M57SS87FAED10Y7K2QA57XEP",
+   "job": "gfs",
+   "phase": "running",
+   "since": "2026-10-18T15:24:15.219Z",
+   "peakMemoryBytes": 641728512,
+   "waitingToReport": false
+  },
+  {
+   "id": "r_01M57SS87FZC3JNC1DX6NRSD9E",
+   "job": "wind-obs",
+   "phase": "running",
+   "since": "2026-10-18T15:24:15.224Z",
+   "peakMemoryBytes": 67108864,
+   "waitingToReport": false
+  }
+ ],
+ "outbox": 0,
+ "upcoming": [],
+ "agent": {
+  "pid": 33656,
+  "startedAt": "2026-10-18T15:23:02.572Z",
+  "uptimeSeconds": 78,
+  "rssBytes": 65634304,
+  "logFile": "/tmp/hc-status-demo/agent.log",
+  "logHint": null
+ }
+}
+"""#
+
+    static let statusIdle = #"""
+{
+ "statusApi": 1,
+ "agentVersion": "0.3.0",
+ "protocol": 1,
+ "machineId": "m_01M57SQWBSWA5PY4YPZNG56MTD",
+ "name": "status-demo",
+ "server": "http://127.0.0.1:56870",
+ "dashboardUrl": "http://127.0.0.1:56869/",
+ "connection": "online",
+ "connected": true,
+ "drain": false,
+ "paused": false,
+ "pausedAt": null,
+ "draining": false,
+ "drainingSince": null,
+ "serverDrain": false,
+ "claiming": true,
+ "notClaimingBecause": [],
+ "revoked": false,
+ "upgradeRequired": false,
+ "lastSyncAt": "2026-10-18T15:29:25.320Z",
+ "nextSyncAt": "2026-10-18T15:29:55.320Z",
+ "lastError": null,
+ "clockSkewMs": -6,
+ "runtime": {
+  "kind": "fake",
+  "ok": true,
+  "lastError": null,
+  "health": {
+   "docker": "ok",
+   "lastError": null
+  },
+  "vm": null,
+  "lifecycle": null,
+  "awake": null
+ },
+ "current": [],
+ "runs": [],
+ "outbox": 0,
+ "upcoming": [],
+ "agent": {
+  "pid": 33656,
+  "startedAt": "2026-10-18T15:23:02.572Z",
+  "uptimeSeconds": 396,
+  "rssBytes": 55623680,
+  "logFile": "/tmp/hc-status-demo/agent.log",
+  "logHint": null
+ }
+}
+"""#
+
+    static let history = #"""
+{
+ "runs": [
+  {
+   "run": "r_01M57SS87FAED10Y7K2QA57XEP",
+   "job": "gfs",
+   "attempt": 1,
+   "source": "manual",
+   "image": "ghcr.io/example/wingfoil@sha256:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+   "digest": "sha256:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+   "claimedAt": "2026-10-18T15:24:15.182Z",
+   "startedAt": "2026-10-18T15:24:15.198Z",
+   "finishedAt": "2026-10-18T15:26:15.200Z",
+   "outcome": "completed",
+   "exitCode": 0,
+   "oomKilled": false,
+   "timedOut": false,
+   "cancelled": false,
+   "error": null,
+   "errorDetail": null,
+   "durationMs": 120002,
+   "pullMs": 0,
+   "vmWaitMs": 0,
+   "peakMemoryBytes": 851443712,
+   "memoryLimitBytes": 1073741824,
+   "avgCpuPct": 65.3,
+   "cpuSeconds": 18,
+   "published": [],
+   "reported": {
+    "at": "2026-10-18T15:26:15.225Z",
+    "state": "succeeded"
+   },
+   "passed": true
+  },
+  {
+   "run": "r_01M57SS87FZC3JNC1DX6NRSD9E",
+   "job": "wind-obs",
+   "attempt": 1,
+   "source": "manual",
+   "image": "ghcr.io/example/wingfoil@sha256:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+   "digest": "sha256:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+   "claimedAt": "2026-10-18T15:24:15.183Z",
+   "startedAt": "2026-10-18T15:24:15.203Z",
+   "finishedAt": "2026-10-18T15:24:35.214Z",
+   "outcome": "cancelled",
+   "exitCode": 143,
+   "oomKilled": false,
+   "timedOut": false,
+   "cancelled": true,
+   "error": null,
+   "errorDetail": null,
+   "durationMs": 20011,
+   "pullMs": 0,
+   "vmWaitMs": 0,
+   "peakMemoryBytes": 67108864,
+   "memoryLimitBytes": 268435456,
+   "avgCpuPct": 5,
+   "cpuSeconds": 0,
+   "published": [],
+   "reported": {
+    "at": "2026-10-18T15:24:35.237Z",
+    "state": "cancelled"
+   },
+   "passed": null
+  },
+  {
+   "run": "r_01M57SR6Q95377C13Z07A0PRBJ",
+   "job": "icon-eu",
+   "attempt": 1,
+   "source": "manual",
+   "image": "ghcr.io/example/wingfoil@sha256:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+   "digest": "sha256:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+   "claimedAt": "2026-10-18T15:23:32.625Z",
+   "startedAt": "2026-10-18T15:23:32.641Z",
+   "finishedAt": "2026-10-18T15:23:35.645Z",
+   "outcome": "published",
+   "exitCode": 0,
+   "oomKilled": false,
+   "timedOut": false,
+   "cancelled": false,
+   "error": null,
+   "errorDetail": null,
+   "durationMs": 3004,
+   "pullMs": 2,
+   "vmWaitMs": 0,
+   "peakMemoryBytes": 429916160,
+   "memoryLimitBytes": 536870912,
+   "avgCpuPct": 58,
+   "cpuSeconds": 0,
+   "published": [
+    {
+     "key": "icon-eu",
+     "run": "2026101806"
+    }
+   ],
+   "reported": {
+    "at": "2026-10-18T15:23:35.661Z",
+    "state": "succeeded"
+   },
+   "passed": true
+  },
+  {
+   "run": "r_01M57SRCK4B9N5BBM4QEJMF91J",
+   "job": "harmonie",
+   "attempt": 1,
+   "source": "manual",
+   "image": "ghcr.io/example/wingfoil@sha256:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+   "digest": "sha256:0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+   "claimedAt": "2026-10-18T15:23:32.626Z",
+   "startedAt": "2026-10-18T15:23:32.646Z",
+   "finishedAt": "2026-10-18T15:23:35.147Z",
+   "outcome": "failed",
+   "exitCode": 1,
+   "oomKilled": false,
+   "timedOut": false,
+   "cancelled": false,
+   "error": "requests.exceptions.HTTPError: 503 Server Error: Service Unavailable for url: https://opendata.example.org/harmonie/2026101806",
+   "errorDetail": "Traceback (most recent call last):\n  File \"/app/force5/harmonie.py\", line 88, in fetch\n    response.raise_for_status()\nrequests.exceptions.HTTPError: 503 Server Error: Service Unavailable for url: https://opendata.example.org/harmonie/2026101806",
+   "durationMs": 2502,
+   "pullMs": 2,
+   "vmWaitMs": 0,
+   "peakMemoryBytes": 230686720,
+   "memoryLimitBytes": 536870912,
+   "avgCpuPct": 35,
+   "cpuSeconds": 0,
+   "published": [],
+   "reported": {
+    "at": "2026-10-18T15:23:35.172Z",
+    "state": "failed"
+   },
+   "passed": false
+  }
+ ]
+}
+"""#
+
+    static func decode<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
+        try JSONDecoder().decode(T.self, from: Data(json.utf8))
+    }
+
+    /// The status with some fields replaced (paused, offline, a dashboard drain…).
+    static func status(_ json: String = statusIdle, _ change: (inout [String: Any]) -> Void) throws -> AgentStatus {
+        var object = try JSONSerialization.jsonObject(with: Data(json.utf8)) as! [String: Any]
+        change(&object)
+        return try JSONDecoder().decode(AgentStatus.self, from: JSONSerialization.data(withJSONObject: object))
+    }
+}
