@@ -26,6 +26,8 @@ export const DEFAULT_CONFIG = {
   allowLocalImages: false,
   envFile: null,
   statusPort: DEFAULT_STATUS_PORT,
+  dashboardUrl: null,
+  logFile: null,
   stopGraceSeconds: 30,
   statsIntervalSeconds: 3,
   pullTimeoutSeconds: 1200,
@@ -94,6 +96,12 @@ function checkConfig(config) {
   if (!Number.isInteger(config.statusPort) || config.statusPort < 0 || config.statusPort > 65_535) {
     throw new Error("statusPort must be a port number (0 to turn the status server off)");
   }
+  if (config.dashboardUrl !== null && config.dashboardUrl !== undefined && !/^https?:\/\/[^\s]+$/i.test(String(config.dashboardUrl))) {
+    throw new Error("dashboardUrl must be an http(s) URL (the dashboard, hc-web) or null");
+  }
+  if (config.logFile !== null && config.logFile !== undefined && (typeof config.logFile !== "string" || !config.logFile)) {
+    throw new Error("logFile must be a path or null");
+  }
   for (const section of ["docker", "colima", "caps", "process"]) {
     if (config[section] === null || typeof config[section] !== "object" || Array.isArray(config[section])) throw new Error(`${section} must be an object`);
   }
@@ -124,6 +132,7 @@ export class StateDir {
     this.defaultEnvPath = path.join(this.dir, "env");
     this.statusTokenPath = path.join(this.dir, "status-token");
     this.localStatePath = path.join(this.dir, "state.json");
+    this.historyPath = path.join(this.dir, "history.jsonl");
     this.outboxDir = path.join(this.dir, "outbox");
     this.runsDir = path.join(this.dir, "runs");
   }
@@ -231,7 +240,7 @@ export class StateDir {
       }
     };
     await check(this.dir, 0o700);
-    for (const file of [this.configPath, this.credentialPath, this.statusTokenPath, this.defaultEnvPath, this.localStatePath]) {
+    for (const file of [this.configPath, this.credentialPath, this.statusTokenPath, this.defaultEnvPath, this.localStatePath, this.historyPath, `${this.historyPath}.1`]) {
       await check(file, 0o600);
     }
     return problems;
