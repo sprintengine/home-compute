@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import { chmod, lstat, mkdir, mkdtemp, readFile, stat, symlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -13,7 +13,7 @@ import {
   authForRegistry, chooseManifest, extractTar, insideRoot, jobCommand, jobEnv, normalizeImageRef, packTar, parseWwwAuthenticate, pullImage,
 } from "../src/runtime/oci.mjs";
 import { ProcessRuntime } from "../src/runtime/process-runtime.mjs";
-import { tempState } from "./support.mjs";
+import { tempState, until } from "./support.mjs";
 
 async function tempDir(t) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "hc-oci-"));
@@ -235,8 +235,157 @@ test("a private registry pull checks the digest, uses the bearer token, and does
   }), /did not match/);
 });
 
+test("concurrent pulls of one image share one download and one published cache entry", async (t) => {
+  const password = "ghcr-pat-not-a-real-secret";
+  const { server, fetchImpl, manifestDigest, layerDigest, seen } = await registryStandIn(t, { password, file: "hello" });
+  const auth = { server: "ghcr.io", username: "bot", password };
+  const state = await tempState(t);
+  const runtime = new ProcessRuntime({ state, fetch: fetchImpl, platform: "linux" });
+  const [firstTag, secondTag, digestPull] = await Promise.all([
+    runtime.pull("ghcr.io/acme/app:1", { auth }),
+    runtime.pull("ghcr.io/acme/app:1", { auth }),
+    runtime.pull(`ghcr.io/acme/app@${manifestDigest}`, { auth }),
+  ]);
+  assert.equal(firstTag.digest, manifestDigest);
+  assert.equal(secondTag.digest, manifestDigest);
+  assert.equal(digestPull.digest, manifestDigest);
+  assert.equal(seen.filter((entry) => entry.path.includes(`/blobs/${layerDigest}`)).length, 1);
+  const imageDir = path.join(state.dir, "cache", "images", "sha256", manifestDigest.slice("sha256:".length));
+  assert.equal(await readFile(path.join(imageDir, "rootfs", "app.txt"), "utf8"), "hello");
+  // The in-flight entry is dropped when the pull settles, so the next run still resolves the tag.
+  const manifests = seen.filter((entry) => entry.path.includes("/manifests/")).length;
+  const again = await runtime.pull("ghcr.io/acme/app:1", { auth });
+  assert.equal(again.cached, true);
+  assert.equal(again.digest, manifestDigest);
+  assert.ok(seen.filter((entry) => entry.path.includes("/manifests/")).length > manifests);
+  assert.equal(seen.filter((entry) => entry.path.includes(`/blobs/${layerDigest}`)).length, 1);
+  assert.equal(server.listening, true);
+});
+
+test("two runtimes publishing one digest keep the image that landed first", async (t) => {
+  const password = "ghcr-pat-not-a-real-secret";
+  const stand = await registryStandIn(t, { password, file: "from-layer", holdLayers: true });
+  const auth = { server: "ghcr.io", username: "bot", password };
+  const state = await tempState(t);
+  const left = new ProcessRuntime({ state, fetch: stand.fetchImpl, platform: "linux" });
+  const right = new ProcessRuntime({ state, fetch: stand.fetchImpl, platform: "linux" });
+  const imageDir = path.join(state.dir, "cache", "images", "sha256", stand.manifestDigest.slice("sha256:".length));
+  const both = Promise.all([
+    left.pull("ghcr.io/acme/app:1", { auth }),
+    right.pull("ghcr.io/acme/app:1", { auth }),
+  ]);
+  // Both pulls are past the manifest and blocked on the layer. Plant the winner before either renames.
+  await until(() => stand.layersWaiting() >= 2);
+  await mkdir(path.join(imageDir, "rootfs"), { recursive: true });
+  await writeFile(path.join(imageDir, "rootfs", "app.txt"), "winner");
+  await writeFile(path.join(imageDir, "config.json"), "{}\n");
+  stand.releaseLayers();
+  const [first, second] = await both;
+  assert.equal(first.digest, stand.manifestDigest);
+  assert.equal(second.digest, stand.manifestDigest);
+  assert.equal(await readFile(path.join(imageDir, "rootfs", "app.txt"), "utf8"), "winner");
+  assert.equal(stand.seen.filter((entry) => entry.path.includes("/blobs/")).length >= 2, true);
+});
+
+test("two runtimes unpacking one digest both finish when the publishes race", async (t) => {
+  const password = "ghcr-pat-not-a-real-secret";
+  const stand = await registryStandIn(t, { password, file: "raced", holdLayers: true });
+  const auth = { server: "ghcr.io", username: "bot", password };
+  const state = await tempState(t);
+  const left = new ProcessRuntime({ state, fetch: stand.fetchImpl, platform: "linux" });
+  const right = new ProcessRuntime({ state, fetch: stand.fetchImpl, platform: "linux" });
+  const both = Promise.all([
+    left.pull("ghcr.io/acme/app:1", { auth }),
+    right.pull("ghcr.io/acme/app:1", { auth }),
+  ]);
+  await until(() => stand.layersWaiting() >= 2);
+  stand.releaseLayers();
+  const [first, second] = await both;
+  assert.equal(first.digest, stand.manifestDigest);
+  assert.equal(second.digest, stand.manifestDigest);
+  const imageDir = path.join(state.dir, "cache", "images", "sha256", stand.manifestDigest.slice("sha256:".length));
+  assert.equal(await readFile(path.join(imageDir, "rootfs", "app.txt"), "utf8"), "raced");
+  assert.equal(await readFile(path.join(imageDir, "config.json"), "utf8").then((text) => JSON.parse(text).config.Cmd[0]), "echo");
+});
+
 function sha(bytes) {
   return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
+
+/**
+ * A one-image registry. With `holdLayers`, each layer request waits until
+ * `releaseLayers()`, so a test can publish the cache entry or start both
+ * publishes together.
+ */
+async function registryStandIn(t, { password, file, holdLayers = false }) {
+  const layerTar = packTar([{ name: "app.txt", data: file, mode: 0o644 }]);
+  const layerGz = gzipSync(layerTar);
+  const config = { architecture: "amd64", os: "linux", config: { Cmd: ["echo", "hello"], Env: ["A=1"] }, rootfs: { type: "layers", diff_ids: [] } };
+  const configBytes = Buffer.from(JSON.stringify(config));
+  const layerDigest = sha(layerGz);
+  const configDigest = sha(configBytes);
+  const manifest = {
+    schemaVersion: 2,
+    mediaType: "application/vnd.oci.image.manifest.v1+json",
+    config: { mediaType: "application/vnd.oci.image.config.v1+json", digest: configDigest, size: configBytes.length },
+    layers: [{ mediaType: "application/vnd.oci.image.layer.v1.tar+gzip", digest: layerDigest, size: layerGz.length }],
+  };
+  const manifestBytes = Buffer.from(JSON.stringify(manifest));
+  const manifestDigest = sha(manifestBytes);
+  const blobs = { [layerDigest]: layerGz, [configDigest]: configBytes };
+  const seen = [];
+  let waiting = 0;
+  let release = () => {};
+  const gate = holdLayers ? new Promise((resolve) => { release = resolve; }) : null;
+  const server = createServer(async (request, response) => {
+    const auth = request.headers.authorization ?? "";
+    seen.push({ path: request.url, auth });
+    if (request.url.startsWith("/token")) {
+      if (auth !== `Basic ${Buffer.from(`bot:${password}`).toString("base64")}`) {
+        response.writeHead(401).end("no");
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ token: "issued-token" }));
+      return;
+    }
+    if (!auth.includes("issued-token")) {
+      const realm = `http://127.0.0.1:${server.address().port}/token`;
+      response.writeHead(401, { "www-authenticate": `Bearer realm="${realm}",service="test",scope="repository:acme/app:pull"` }).end("auth");
+      return;
+    }
+    if (request.url.includes("/manifests/")) {
+      response.writeHead(200, { "content-type": manifest.mediaType, "docker-content-digest": manifestDigest }).end(manifestBytes);
+      return;
+    }
+    const digest = decodeURIComponent(request.url.split("/blobs/")[1] ?? "");
+    const body = blobs[digest];
+    if (!body) {
+      response.writeHead(404).end("missing");
+      return;
+    }
+    if (digest === layerDigest && gate) {
+      waiting += 1;
+      await gate;
+    }
+    response.writeHead(200, { "content-type": "application/octet-stream" }).end(body);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => {
+    release();
+    return new Promise((resolve) => server.close(resolve));
+  });
+  const port = server.address().port;
+  const fetchImpl = (url, init) => {
+    const target = new URL(url);
+    if (target.hostname === "ghcr.io") target.protocol = "http:";
+    target.host = `127.0.0.1:${port}`;
+    return fetch(target, init);
+  };
+  return {
+    server, fetchImpl, manifestDigest, layerDigest, seen,
+    layersWaiting: () => waiting,
+    releaseLayers() { release(); },
+  };
 }
 
 function streamOf(buffer) {

@@ -132,9 +132,11 @@ function registryUrl(spec, pathname) {
  * is the manifest the layers belong to (a tag's, or the pinned one). When
  * `have(digest)` says that manifest is already unpacked, nothing past the
  * manifest is fetched and the answer is `{digest, cached: true}`: a current
- * tag costs one or two small requests, as `docker pull` does.
+ * tag costs one or two small requests, as `docker pull` does. `onDigest` runs
+ * once that digest is known, before any layer. If it returns a promise, that
+ * pull already owns the digest: this one waits for it and does not download.
  */
-export async function pullImage(reference, { auth = null, rootfs, timeoutMs = 20 * 60_000, fetch: fetchImpl = globalThis.fetch, arch = process.arch, have = null } = {}) {
+export async function pullImage(reference, { auth = null, rootfs, timeoutMs = 20 * 60_000, fetch: fetchImpl = globalThis.fetch, arch = process.arch, have = null, onDigest = null } = {}) {
   const spec = normalizeImageRef(reference);
   const signal = AbortSignal.timeout(timeoutMs);
   const client = new RegistryClient(spec, authForRegistry(auth, spec.registry), fetchImpl, signal);
@@ -148,6 +150,11 @@ export async function pullImage(reference, { auth = null, rootfs, timeoutMs = 20
     manifest.digest = manifest.digest ?? chosen.digest;
   }
   if (manifest.digest && have && await have(manifest.digest)) return { digest: manifest.digest, cached: true };
+  const joined = onDigest ? onDigest(manifest.digest) : null;
+  if (joined && typeof joined.then === "function") {
+    await joined;
+    return { digest: manifest.digest, cached: true };
+  }
   const configDigest = manifest.body.config?.digest;
   if (!configDigest) throw new Error(`${reference} is not an image manifest`);
   const configBytes = await client.blob(configDigest);

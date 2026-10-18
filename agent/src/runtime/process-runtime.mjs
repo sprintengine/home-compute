@@ -272,6 +272,14 @@ export class ProcessRuntime {
     this.inUse = new Map();
     this.detected = null;
     this.cgroupInfo = null;
+    // In-flight pulls, keyed by image reference and, once known, by digest. Two runs of one image share one download.
+    this.pulls = new Map();
+  }
+
+  /** The lock key for a pull: a pinned digest, otherwise `repo:tag`. */
+  #pullKey(reference) {
+    const spec = normalizeImageRef(reference);
+    return spec.digest ?? `${spec.repo}:${spec.tag ?? "latest"}`;
   }
 
   #imageDir(digest) {
@@ -351,16 +359,46 @@ export class ProcessRuntime {
   /**
    * Pulls `reference`. `auth` is `{server, username, password}` from the claim,
    * used for this pull's token exchange only. A tag that cannot be pulled but
-   * was unpacked here before runs as that copy.
+   * was unpacked here before runs as that copy. Two pulls of one reference
+   * share one download. Two references that name one digest share it too,
+   * once the manifest is known.
    */
   async pull(reference, { auth = null, timeoutMs = 20 * 60_000 } = {}) {
+    const key = this.#pullKey(reference);
+    const running = this.pulls.get(key);
+    if (running) return running;
+    // One promise is stored for the reference and, once known, the digest.
+    // `onDigest` runs after the first await, so `settled` is assigned by then.
+    // A pull must not await its own promise: that never resolves.
+    let settled;
+    const task = this.#pullFresh(reference, { auth, timeoutMs }, (digest) => {
+      if (!digest) return null;
+      const owner = this.pulls.get(digest);
+      if (!owner || owner === settled) {
+        this.pulls.set(digest, settled);
+        return null;
+      }
+      return owner;
+    });
+    settled = task.finally(() => {
+      for (const [name, pending] of this.pulls) {
+        if (pending === settled) this.pulls.delete(name);
+      }
+    });
+    this.pulls.set(key, settled);
+    return settled;
+  }
+
+  async #pullFresh(reference, { auth = null, timeoutMs = 20 * 60_000 } = {}, onDigest = null) {
     const started = this.clock.monotonic();
     const staging = path.join(this.cacheDir, "staging", `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
     const rootfs = path.join(staging, "rootfs");
     try {
-      const result = await pullImage(reference, { auth, rootfs, timeoutMs, fetch: this.fetch, have: (digest) => this.#imageReady(digest) });
+      const result = await pullImage(reference, {
+        auth, rootfs, timeoutMs, fetch: this.fetch, onDigest, have: (digest) => this.#imageReady(digest),
+      });
       if (result.cached) {
-        // The tag still names what is unpacked here: nothing was downloaded.
+        // The tag still names what is unpacked here, or another pull of this digest is publishing it.
         await rm(staging, { recursive: true, force: true }).catch(() => {});
         await this.#rememberRef(reference, result.digest);
         await this.images.used(normalizeImageRef(reference).repo, result.digest, { pulled: true, now: this.clock.now() }).catch(() => {});
@@ -368,10 +406,7 @@ export class ProcessRuntime {
       }
       await writeJson(path.join(staging, "config.json"), result.config);
       await writeJson(path.join(staging, "meta.json"), { digest: result.digest, reference, pulledAt: this.clock.now() });
-      const dest = this.#imageDir(result.digest);
-      await mkdir(path.dirname(dest), { recursive: true });
-      await rm(dest, { recursive: true, force: true });
-      await rename(staging, dest);
+      await this.#placeImage(staging, result.digest);
       await this.#rememberRef(reference, result.digest);
       await this.images.used(normalizeImageRef(reference).repo, result.digest, { pulled: true, now: this.clock.now() }).catch(() => {});
       return { digest: result.digest, ms: Math.round(this.clock.monotonic() - started) };
@@ -381,6 +416,32 @@ export class ProcessRuntime {
       if (cached && !normalizeImageRef(reference).digest) {
         this.log("pull_failed_using_local", { image: reference, error: error.message });
         return { digest: cached, ms: Math.round(this.clock.monotonic() - started), stale: true };
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Moves a finished staging directory onto `images/<algo>/<hex>`. Two pulls
+   * can finish together. The destination is never removed first: that deletes
+   * the copy another pull just published, and the following rename then fails
+   * with ENOTEMPTY. When the target is already a complete image, this staging
+   * directory is discarded and that image is the one that runs.
+   */
+  async #placeImage(staging, digest) {
+    const dest = this.#imageDir(digest);
+    await mkdir(path.dirname(dest), { recursive: true });
+    if (await this.#imageReady(digest)) {
+      await rm(staging, { recursive: true, force: true });
+      return;
+    }
+    try {
+      await rename(staging, dest);
+    } catch (error) {
+      // rename(2) of a directory onto a non-empty directory returns ENOTEMPTY.
+      if ((error?.code === "ENOTEMPTY" || error?.code === "EEXIST") && await this.#imageReady(digest)) {
+        await rm(staging, { recursive: true, force: true });
+        return;
       }
       throw error;
     }
@@ -397,10 +458,7 @@ export class ProcessRuntime {
     await copyTree(rootfs, path.join(staging, "rootfs"));
     await writeJson(path.join(staging, "config.json"), config);
     await writeJson(path.join(staging, "meta.json"), { digest, reference, installed: true });
-    const dest = this.#imageDir(digest);
-    await mkdir(path.dirname(dest), { recursive: true });
-    await rm(dest, { recursive: true, force: true });
-    await rename(staging, dest);
+    await this.#placeImage(staging, digest);
     await this.#rememberRef(reference, digest);
     await this.images.used(normalizeImageRef(reference).repo, digest, { pulled: true, now: this.clock.now() }).catch(() => {});
     return { digest };
