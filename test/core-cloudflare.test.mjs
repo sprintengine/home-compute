@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   ABSOLUTE_MAX_RUN_SECONDS, CLOUDFLARE_MACHINE_ID, CLOUDFLARE_RUNTIME, containerCommand, deployedInstanceTypes, estimateContainerCost,
-  exitCodeFromError, imageDigest, imageRepository, imagesMatch, INSTANCE_TYPES, interpretExit, localSecretNames, normaliseGuard, parseProbe,
+  executorLabels, exitCodeFromError, imageDigest, imageRepository, imagesMatch, INSTANCE_TYPES, interpretExit, localSecretNames, normaliseGuard, parseProbe,
   probeCommand, selectInstanceType, startIsTransient, targetsCloudflare, waitCommand, watchDecision, wrappedEntrypoint,
 } from "../src/core/cloudflare.mjs";
 import { normaliseJob } from "../src/core/job.mjs";
@@ -60,6 +60,11 @@ test("a tag runs the deployed version of its repository; a pinned digest must be
   assert.equal(imagesMatch(`ghcr.io/sprintengine/wingfoil-forecast@sha256:${"cd".repeat(32)}`, deployed), false);
   assert.equal(imagesMatch("ghcr.io/sprintengine/other:production", deployed), false);
   assert.equal(imagesMatch(deployed, ""), false);
+  // A job pinned to the multi-platform ghcr digest runs on its amd64 copy, when hc-core knows that is where it came from.
+  const index = `ghcr.io/sprintengine/wingfoil-forecast@sha256:${"ef".repeat(32)}`;
+  assert.equal(imagesMatch(index, deployed), false);
+  assert.equal(imagesMatch(index, deployed, index), true);
+  assert.equal(imagesMatch(`ghcr.io/sprintengine/wingfoil-forecast@sha256:${"cd".repeat(32)}`, deployed, index), false);
   assert.equal(imageDigest(deployed), `sha256:${digest}`);
   assert.deepEqual(containerCommand({ entrypoint: ["python"], args: ["-m", "job"] }, ["--once"]), ["python", "-m", "job", "--once"]);
   assert.equal(containerCommand({ entrypoint: null, args: [] }), null);
@@ -67,7 +72,11 @@ test("a tag runs the deployed version of its repository; a pinned digest must be
 });
 
 test("a clean exit is never out of memory, even with the cgroup peak at the limit", () => {
-  assert.deepEqual(normaliseGuard({}), { maxConcurrent: 1, maxRunSeconds: 1200 });
+  assert.deepEqual(normaliseGuard({}), { maxConcurrent: 1, maxRunSeconds: 1200, labels: {} });
+  assert.deepEqual(normaliseGuard({ labels: { pool: "wingfoil" } }).labels, { pool: "wingfoil" });
+  assert.throws(() => normaliseGuard({ labels: { site: "home" } }), /executor's own label/);
+  assert.throws(() => normaliseGuard({ labels: { pool: 3 } }), /must be a string/);
+  assert.deepEqual(executorLabels({ pool: "wingfoil" }), { pool: "wingfoil", arch: "amd64", os: "linux", runtime: "cloudflare-container", site: "cloudflare" });
   assert.equal(ABSOLUTE_MAX_RUN_SECONDS, 1200);
   assert.throws(() => normaliseGuard({ maxConcurrent: 0 }), /maxConcurrent/);
   assert.throws(() => normaliseGuard({ maxRunSeconds: 1201 }), /maxRunSeconds/);

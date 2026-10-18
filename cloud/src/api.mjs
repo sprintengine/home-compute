@@ -442,7 +442,7 @@ function checkSettings(body) {
   }
   if (body.cloudflare !== undefined) {
     if (!body.cloudflare || typeof body.cloudflare !== "object" || Array.isArray(body.cloudflare)) throw new HttpError(400, "cloudflare must be an object");
-    const unknownGuard = Object.keys(body.cloudflare).filter((key) => !["maxConcurrent", "maxRunSeconds"].includes(key));
+    const unknownGuard = Object.keys(body.cloudflare).filter((key) => !["maxConcurrent", "maxRunSeconds", "labels"].includes(key));
     if (unknownGuard.length) throw new HttpError(400, `Unknown cloudflare setting ${unknownGuard.join(", ")}`);
     try {
       normaliseGuard(body.cloudflare);
