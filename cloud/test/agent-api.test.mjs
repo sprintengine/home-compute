@@ -8,6 +8,7 @@ import { sha256Hex } from "../../src/core/protocol.mjs";
 import {
   agentCall, call, createJob, cron, enrolMachine, mockCertificates, resetDatabase, rows, syncAs, syncBody,
 } from "./helpers.mjs";
+import { agentConfig } from "../src/sync.mjs";
 
 // Yesterday, 00:00 UTC: always in the past, so Access tokens minted now are valid then.
 const DAY0 = Math.floor(Date.now() / 86_400_000) * 86_400_000 - 86_400_000;
@@ -176,9 +177,11 @@ describe("claims", () => {
     expect((await syncAs(arm, at(8, 0, 4), { machine: { ...small, drain: true, free: { ...small.free, memoryMiB: 8192 } } })).body.claims).toEqual([]);
     expect((await syncAs(arm, at(8, 0, 5), { machine: { ...small, health: { docker: "unreachable" }, free: { ...small.free, memoryMiB: 8192 } } })).body.claims).toEqual([]);
     expect((await syncAs(arm, at(8, 0, 6), { claim: false })).body.claims).toEqual([]);
-    // Drained from the dashboard: the server's own flag.
+    // Drained from the dashboard: the server's own flag, which the answer passes on for the agent's local status.
+    expect((await syncAs(arm, at(8, 0, 6) + 500, { claim: false })).body.machine).toEqual({ drain: false });
     expect((await call(`/v1/machines/${arm.machineId}`, { method: "PATCH", body: { drain: true } })).status).toBe(200);
-    expect((await syncAs(arm, at(8, 0, 7))).body.claims).toEqual([]);
+    const drained = await syncAs(arm, at(8, 0, 7));
+    expect([drained.body.claims, drained.body.machine]).toEqual([[], { drain: true }]);
     expect((await call(`/v1/machines/${arm.machineId}`, { method: "PATCH", body: { drain: false } })).status).toBe(200);
     // The dashboard's caps limit what the agent says is free.
     await call(`/v1/machines/${arm.machineId}`, { method: "PATCH", body: { capacity: { memoryMiB: 2048 } } });
@@ -441,6 +444,15 @@ describe("progress, completion and retries", () => {
     expect((await cron(at(8, 7, 10))).timedOut).toBe(0);
     expect((await cron(at(8, 7, 11))).timedOut).toBe(1);
     expect((await syncAs(machine, at(8, 7, 20), { runs: [{ id: second, phase: "running" }] })).body.cancel).toEqual([second]);
+  });
+});
+
+describe("the agent's config", () => {
+  it("passes DASHBOARD_URL on as dashboardUrl, for the agent's local apps, only when it is an http(s) URL", () => {
+    expect(agentConfig({})).toEqual({ idleStopSeconds: 300, keepWarmSeconds: 600 });
+    expect(agentConfig({ DASHBOARD_URL: "https://hc-web.example.workers.dev/" }))
+      .toEqual({ idleStopSeconds: 300, keepWarmSeconds: 600, dashboardUrl: "https://hc-web.example.workers.dev/" });
+    expect(agentConfig({ DASHBOARD_URL: "javascript:alert(1)" }).dashboardUrl).toBeUndefined();
   });
 });
 
