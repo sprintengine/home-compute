@@ -292,12 +292,14 @@ export function sampleTree(pid, previous, now = Date.now()) {
   let cpuPct = 0;
   if (previous && now > previous.now) {
     const seconds = (now - previous.now) / 1000;
-    cpuPct = ((ticks - previous.ticks) / CLK_TCK) / seconds * 100;
+    // A child that exits leaves the tree, so the summed ticks can fall. That delta is not usage.
+    const delta = Math.max(0, ticks - previous.ticks);
+    cpuPct = (delta / CLK_TCK) / seconds * 100;
   }
   return {
     memoryBytes: rss,
-    cpuPct: Math.round(cpuPct * 10) / 10,
-    cpuSeconds: Math.round((ticks / CLK_TCK) * 1000) / 1000,
+    cpuPct: Math.max(0, Math.round(cpuPct * 10) / 10),
+    cpuSeconds: Math.max(0, Math.round((ticks / CLK_TCK) * 1000) / 1000),
     raw: { ticks, now },
   };
 }

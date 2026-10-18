@@ -16,7 +16,7 @@ import { main } from "../src/cli.mjs";
 import { spawn } from "node:child_process";
 import { ProcessRuntime, processRefusal, removeCgroup } from "../src/runtime/process-runtime.mjs";
 import { JOB_NICE } from "../src/runtime/process-runner.mjs";
-import { NO_SANDBOX, detectSandbox, sandboxLaunch } from "../src/runtime/sandbox.mjs";
+import { NO_SANDBOX, detectSandbox, sampleTree, sandboxLaunch } from "../src/runtime/sandbox.mjs";
 import { tempState, until } from "./support.mjs";
 import { Readable } from "node:stream";
 
@@ -25,6 +25,21 @@ const REF = "ghcr.io/example/job:test";
 const DIGEST = `sha256:${"ab".repeat(32)}`;
 /** Starting a job reads /proc, so these run on Linux only. */
 const LINUX = process.platform === "linux" ? {} : { skip: "the process runtime runs jobs on Linux only" };
+
+test("cpu usage stays at zero when a child's ticks drop out of the tree", () => {
+  const now = 1_000_000;
+  const before = sampleTree(process.pid, null, now);
+  assert.equal(before.cpuPct, 0);
+  assert.ok(before.cpuSeconds >= 0);
+  // The exited child's CPU was in the previous sum and is gone now. hc-core rejects a negative figure with HTTP 400.
+  const dropped = sampleTree(process.pid, { ticks: before.raw.ticks + 1e12, now: now - 1000 }, now);
+  assert.equal(dropped.cpuPct, 0);
+  assert.ok(dropped.cpuSeconds >= 0);
+  const grown = sampleTree(process.pid, { ticks: Math.max(0, before.raw.ticks - 50), now: now - 1000 }, now);
+  assert.ok(grown.cpuPct >= 0);
+  assert.ok(grown.cpuSeconds >= 0);
+  if (process.platform === "linux" && before.raw.ticks >= 50) assert.ok(grown.cpuPct > 0);
+});
 
 function clockAt(start = 10_000) {
   let now = start;
