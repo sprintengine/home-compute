@@ -93,3 +93,6 @@ func setAutostart(on bool) error {
 func serviceHint() string {
 	return "Start it: sudo systemctl start home-compute-agent"
 }
+
+// menuText escapes a label for DBusMenu, where "_" marks an access key: "raise_for_status" would lose it.
+func menuText(text string) string { return strings.ReplaceAll(text, "_", "__") }

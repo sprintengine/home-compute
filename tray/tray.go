@@ -248,7 +248,7 @@ func setLine(item *systray.MenuItem, text string) {
 		item.Hide()
 		return
 	}
-	item.SetTitle(text)
+	item.SetTitle(menuText(text))
 	item.Show()
 }
 
@@ -266,7 +266,7 @@ func (a *trayApp) render() {
 	a.setIcon(view.Icon, view.Dot)
 	systray.SetTitle(view.Title)
 	systray.SetTooltip(view.Tooltip)
-	a.header.SetTitle(view.Header)
+	a.header.SetTitle(menuText(view.Header))
 	setLine(a.notice, view.Notice)
 	setLine(a.hint, view.Hint)
 	if len(view.Running) == 0 {

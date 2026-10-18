@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 
 	"golang.org/x/sys/windows/registry"
@@ -89,3 +90,6 @@ func setAutostart(on bool) error {
 func serviceHint() string {
 	return "Start it: wsl -u root systemctl start home-compute-agent"
 }
+
+// menuText escapes a label for a Win32 menu, where "&" marks an access key.
+func menuText(text string) string { return strings.ReplaceAll(text, "&", "&&") }

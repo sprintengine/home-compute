@@ -254,7 +254,11 @@ func Build(status *Status, history []Entry, problem error, now time.Time, hint s
 		view.Icon = IconDown
 		view.Header = "Home Compute: the agent is not running"
 		if problem != nil {
-			view.Notice = clip(problem.Error(), 120)
+			// The header already says it is not running: the notice is why.
+			detail := strings.TrimSuffix(strings.TrimPrefix(problem.Error(), ErrNotRunning.Error()+" ("), ")")
+			if detail != "" {
+				view.Notice = clip(strings.ToUpper(detail[:1])+detail[1:], 120)
+			}
 		}
 		view.Hint = hint
 		view.Tooltip = "Home Compute: the agent is not running"

@@ -9,12 +9,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image/png"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -121,6 +123,10 @@ func TestStatesOfTheIcon(t *testing.T) {
 		t.Fatalf("offline: %v %q %q", view.Icon, view.Header, view.Notice)
 	}
 	down := Build(nil, nil, ErrNotRunning, now, "Start it: sudo systemctl start home-compute-agent")
+	notRunning := fmt.Errorf("%w (nothing answers on 127.0.0.1:4787)", ErrNotRunning)
+	if view := Build(nil, nil, notRunning, now, ""); view.Notice != "Nothing answers on 127.0.0.1:4787" {
+		t.Fatalf("notice %q", view.Notice)
+	}
 	if down.Icon != IconDown || down.Answered || down.Hint == "" || !strings.Contains(down.Text(), "not running") {
 		t.Fatalf("down: %+v", down)
 	}
@@ -298,5 +304,18 @@ func TestIcons(t *testing.T) {
 	ico := ICO(IconPNG(IconIdle, 0, false))
 	if !bytes.Equal(ico[:6], []byte{0, 0, 1, 0, 1, 0}) || !bytes.Equal(ico[22:30], []byte("\x89PNG\r\n\x1a\n")) {
 		t.Fatalf("ico header % x", ico[:30])
+	}
+}
+
+func TestMenuTextEscapesAccessKeys(t *testing.T) {
+	want := map[string]string{
+		"linux":   "response.raise__for__status() & co",
+		"windows": "response.raise_for_status() && co",
+	}[runtime.GOOS]
+	if want == "" {
+		want = "response.raise_for_status() & co"
+	}
+	if got := menuText("response.raise_for_status() & co"); got != want {
+		t.Fatalf("%s: %q", runtime.GOOS, got)
 	}
 }

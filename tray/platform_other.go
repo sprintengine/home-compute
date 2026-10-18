@@ -28,3 +28,5 @@ func autostartEnabled() bool { return false }
 func setAutostart(on bool) error { return errors.New("start at login is not supported here") }
 
 func serviceHint() string { return "" }
+
+func menuText(text string) string { return text }
