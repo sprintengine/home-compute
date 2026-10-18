@@ -343,6 +343,12 @@ describe("Cloudflare Containers executor", () => {
     expect(cancel.status).toBe(202);
     await Promise.all(waited);
     expect(calls).toHaveLength(2);
+    // A binding that throws at once does not fail the request it follows.
+    const broken = { ...env, HC_CORE: { dispatch() { throw new TypeError("no such entrypoint"); } } };
+    const again = await call("/v1/jobs/now/run", { method: "POST", body: {}, now: NOW + 1, environment: broken, ctx });
+    expect(again.status).toBe(202);
+    await call(`/v1/runs/${run.body.runId}/retry`, { method: "POST", body: {}, now: NOW + 2, environment: broken, ctx }).then((response) => expect(response.status).toBeLessThan(500));
+    await Promise.all(waited);
     // A refused request does not nudge.
     expect((await call("/v1/jobs/missing/run", { method: "POST", body: {}, now: NOW, environment, ctx })).status).toBe(404);
     expect(calls).toHaveLength(2);
