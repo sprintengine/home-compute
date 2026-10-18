@@ -398,7 +398,7 @@ export class ProcessRuntime {
     const launch = sandboxLaunch({
       kind: sandbox.kind, bins: sandbox.bins, rootfs, workdir, command,
       loaderEnv: sandbox.kind === "bwrap" ? loader : {},
-      network, uid: identity.uid, gid: identity.gid, pathEnv: env.PATH,
+      network, uid: identity.uid, gid: identity.gid, pathEnv: env.PATH, options: sandbox.options,
     });
     const memoryMiB = Math.max(16, Math.round(spec.resources?.memoryMiB ?? 1024));
     const limits = { memoryBytes: memoryMiB * 1048576, cpus: spec.resources?.cpus ?? 1, pids: PIDS_LIMIT };
@@ -490,13 +490,15 @@ export class ProcessRuntime {
   }
 
   async facts() {
-    const sandbox = await this.#sandbox().catch((error) => ({ kind: "plain", warning: error.message }));
+    // No sandbox that starts means no run can start: the agent then reports the runtime as down and claims nothing.
+    const sandbox = await this.#sandbox();
+    if (sandbox.missing) throw new Error(sandbox.warning ?? `sandbox ${this.preference} is not available`);
     const limits = this.platform === "linux" ? await this.#limits().catch(() => ({ kind: "watchdog", warning: null })) : { kind: "none", warning: null };
     const capacity = hostCapacity();
     const diskFreeMiB = await freeDiskMiB(this.cacheDir).catch(() => null) ?? await freeDiskMiB(os.homedir());
     return {
       kind: "process",
-      version: `oci/${sandbox.kind}`,
+      version: `oci/${sandbox.kind}${sandbox.options?.pidns === false ? "-nopid" : ""}`,
       cpus: capacity.cpus,
       memoryMiB: capacity.memoryMiB,
       diskFreeMiB,

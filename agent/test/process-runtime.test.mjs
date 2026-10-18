@@ -1,7 +1,9 @@
 // ProcessRuntime without a registry and without Docker: a script image runs
-// in plain mode (so CI needs no bubblewrap), and bubblewrap is used when it
-// actually starts. Secrets stay out of argv and off disk. A stand-in registry
-// is covered in oci.test.mjs; the real busybox pull is process-real.test.mjs.
+// in plain mode, asked for by name (so CI needs no bubblewrap), and
+// bubblewrap is used when it actually starts. Secrets stay out of argv and
+// off disk. A stand-in registry is covered in oci.test.mjs; the real busybox
+// pull is process-real.test.mjs. Tests that start a job need Linux (/proc);
+// elsewhere they are skipped, so `npm run check` passes on a Mac too.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -12,13 +14,15 @@ import test from "node:test";
 import { JOB_LABEL, RUN_LABEL } from "../../src/core/protocol.mjs";
 import { main } from "../src/cli.mjs";
 import { ProcessRuntime, processRefusal } from "../src/runtime/process-runtime.mjs";
-import { detectSandbox, sandboxLaunch } from "../src/runtime/sandbox.mjs";
+import { NO_SANDBOX, detectSandbox, sandboxLaunch } from "../src/runtime/sandbox.mjs";
 import { tempState, until } from "./support.mjs";
 import { Readable } from "node:stream";
 
 const RUN = "r_01J0000000000000000000000P";
 const REF = "ghcr.io/example/job:test";
 const DIGEST = `sha256:${"ab".repeat(32)}`;
+/** Starting a job reads /proc, so these run on Linux only. */
+const LINUX = process.platform === "linux" ? {} : { skip: "the process runtime runs jobs on Linux only" };
 
 function clockAt(start = 10_000) {
   let now = start;
@@ -77,15 +81,48 @@ test("sandbox argv isolates the rootfs and keeps loader variables out of the hel
   assert.deepEqual(launch.args.slice(launch.args.indexOf("--")), ["--", "echo", "hi"]);
 });
 
-test("plain mode refuses a command that is not in the image, and a missing sandbox is a warning rather than a crash", async () => {
+test("plain mode refuses a command that is not in the image", () => {
   assert.throws(() => sandboxLaunch({
     kind: "plain", bins: {}, rootfs: os.tmpdir(), workdir: "/", command: ["this-binary-is-not-there"], network: "bridge",
   }), /not in the image/);
-  const missing = await detectSandbox({ preference: "auto", bins: { bwrap: "/no/bwrap", unshare: "/no/unshare", proot: "/no/proot" } });
-  assert.equal(missing.kind, "plain");
-  assert.match(missing.warning, /no sandbox/);
-  const forced = await detectSandbox({ preference: "bwrap", bins: { bwrap: "/no/bwrap", unshare: "/no/unshare", proot: "/no/proot" } });
-  assert.equal(forced.missing, true);
+});
+
+test("auto never falls back to plain: with no sandbox that starts, the runtime refuses runs and reports itself down", async (t) => {
+  const none = { bwrap: "/no/bwrap", unshare: "/no/unshare", proot: "/no/proot" };
+  const missing = await detectSandbox({ preference: "auto", bins: none, platform: "linux" });
+  assert.equal(missing.kind, "none");
+  assert.equal(missing.missing, true);
+  assert.equal(missing.warning, NO_SANDBOX);
+  assert.equal((await detectSandbox({ preference: "bwrap", bins: none, platform: "linux" })).missing, true);
+  // Plain is only ever what a machine asked for.
+  const plain = await detectSandbox({ preference: "plain", bins: none, platform: "linux" });
+  assert.equal(plain.kind, "plain");
+  assert.equal(plain.missing, undefined);
+  const state = await tempState(t);
+  const runtime = new ProcessRuntime({ state, sandbox: "auto", ...none, platform: "linux" });
+  // facts() failing is what makes the agent claim nothing (runtimeOk false), as with a Docker daemon that does not answer.
+  await assert.rejects(runtime.facts(), /no sandbox starts here/);
+  await assert.rejects(runtime.ensureReady(), /no sandbox starts here/);
+});
+
+test("a sandbox is probed with a run's flags, and bubblewrap without a pid namespace is kept where /proc cannot be mounted again", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "hc-fake-bwrap-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const calls = path.join(dir, "calls");
+  // A container that masks /proc: bubblewrap starts, but a pid namespace's /proc cannot be mounted.
+  const bwrap = path.join(dir, "bwrap");
+  await writeFile(bwrap, `#!/bin/sh\necho "$*" >> "${calls}"\ncase " $* " in *" --unshare-pid "*) echo "bwrap: Can't mount proc on /newroot/proc" >&2; exit 1;; esac\nexit 0\n`, { mode: 0o755 });
+  const found = await detectSandbox({ preference: "auto", bins: { bwrap, unshare: "/no/unshare", proot: "/no/proot" }, platform: "linux" });
+  assert.equal(found.kind, "bwrap");
+  assert.deepEqual(found.options, { pidns: false });
+  assert.match(found.warning, /without a pid namespace/);
+  const [first, second] = (await readFile(calls, "utf8")).trim().split("\n");
+  for (const flag of ["--unshare-user", "--proc /proc", "--dev /dev", "--tmpfs /tmp", "--ro-bind / /", "--hostname home-compute"]) assert.ok(first.includes(flag), `probe has ${flag}: ${first}`);
+  assert.ok(first.includes("--unshare-pid") && !second.includes("--unshare-pid"));
+  const launch = sandboxLaunch({ kind: "bwrap", bins: { bwrap }, rootfs: "/images/root", workdir: "/", command: ["true"], network: "bridge", options: found.options });
+  assert.ok(!launch.args.includes("--unshare-pid"));
+  assert.ok(launch.args.includes("--json-status-fd"));
+  assert.deepEqual(launch.args.slice(launch.args.indexOf("--bind"), launch.args.indexOf("--bind") + 3), ["--bind", "/images/root", "/"]);
 });
 
 test("a spec that would retarget the sandbox is refused before anything starts", () => {
@@ -95,7 +132,7 @@ test("a spec that would retarget the sandbox is refused before anything starts",
   assert.match(processRefusal(spec({ network: "host" })), /not allowed/);
 });
 
-test("a script image runs with the image command, env and secrets, and the secret is not stored", async (t) => {
+test("a script image runs with the image command, env and secrets, and the secret is not stored", LINUX, async (t) => {
   const { runtime } = await setup(t);
   const secret = "process-secret-value-0042";
   await installScript(t, runtime, { body: "console.log(`A=${process.env.A} B=${process.env.B} TOKEN=${process.env.TOKEN}`)" });
@@ -112,7 +149,7 @@ test("a script image runs with the image command, env and secrets, and the secre
   assert.equal(existsSync(runDir), false);
 });
 
-test("a non-zero exit is the process exit code", async (t) => {
+test("a non-zero exit is the process exit code", LINUX, async (t) => {
   const { runtime } = await setup(t);
   await installScript(t, runtime, { body: "process.exit(3)" });
   const failed = await runtime.run(spec());
@@ -121,7 +158,7 @@ test("a non-zero exit is the process exit code", async (t) => {
   await failed.remove();
 });
 
-test("a running job can be cancelled and adopted after the runtime object is gone", async (t) => {
+test("a running job can be cancelled and adopted after the runtime object is gone", LINUX, async (t) => {
   const { state, runtime } = await setup(t);
   await installScript(t, runtime, { body: "import { writeSync } from 'node:fs'; writeSync(1, 'up\\n'); setInterval(() => {}, 500);" });
   const handle = await runtime.run(spec());
@@ -144,7 +181,7 @@ test("a running job can be cancelled and adopted after the runtime object is gon
   void handle;
 });
 
-test("memory past the limit is an OOM kill when cgroup memory is not delegated", async (t) => {
+test("memory past the limit is an OOM kill when cgroup memory is not delegated", LINUX, async (t) => {
   const { runtime } = await setup(t);
   const facts = await runtime.facts();
   if (facts.limits === "cgroup") return t.skip("this machine delegates a memory cgroup; the watchdog is not the enforcer");
@@ -200,7 +237,7 @@ test("bubblewrap runs the image rootfs with its own hostname", async (t) => {
   assert.equal(lines.map((line) => line.trim()).filter(Boolean).at(-1), "home-compute");
 });
 
-test("doctor reports the plain-sandbox warning and runs the self-test image", async (t) => {
+test("doctor reports the plain-sandbox warning and runs the self-test image", LINUX, async (t) => {
   const state = await tempState(t);
   const runtime = new ProcessRuntime({ state, sandbox: "plain", selfTestImage: REF, selfTestArgs: [] });
   await installScript(t, runtime, { body: "console.log('home-compute')" });

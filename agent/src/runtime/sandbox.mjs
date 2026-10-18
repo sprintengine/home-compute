@@ -1,9 +1,15 @@
 // How a process-runtime job is confined. bubblewrap (a user namespace, a pid
-// namespace, and a fresh mount of the image) when it works; otherwise
-// util-linux `unshare`, then proot, then the process itself. The last of
-// those is a fallback, not a sandbox: doctor says so, and the run still
-// happens, because a machine with no helper installed is the case this
-// runtime exists for.
+// namespace, and a fresh mount of the image) when it works, or bubblewrap
+// without the pid namespace where /proc cannot be mounted again (a container
+// whose /proc is masked); otherwise util-linux `unshare`, then proot. Each
+// is probed with the flags a run uses, so the one chosen is one that starts.
+//
+// `plain` (the image's entrypoint run on this machine, with this machine's
+// loader, root and paths) is never chosen by `auto`: an image's binaries
+// need the image's own libraries at `/`, and its absolute paths (an
+// entrypoint script, a work directory) name the image's files, so on most
+// images plain mode fails or, worse, reads and writes this machine's files.
+// A machine may still ask for it by name, for images built to run that way.
 
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
@@ -20,33 +26,40 @@ export const SANDBOX_ENV = /^(LD_|BWRAP_|PROOT_)/;
 export const NETWORK_WARNING = "network bridge shares this machine's network namespace (there is no separate Docker bridge); network none drops the network with bubblewrap or a user namespace";
 
 const SANDBOX_WARNING = {
-  plain: "no sandbox (bubblewrap, a user namespace or proot is not usable): jobs run as plain processes and share this machine's user, files and network. Install bubblewrap to isolate them.",
+  plain: "no sandbox (process.sandbox is plain): jobs run as plain processes with this machine's loader, root and paths, sharing its user, files and network. Only a self-contained image works this way.",
   proot: "sandbox is proot, which confines the root filesystem with ptrace; network none does not get a separate network namespace. Install bubblewrap for that.",
+  nopid: "sandbox is bubblewrap without a pid namespace (this machine's /proc cannot be mounted again, as in a container that masks it): a job sees this machine's processes.",
 };
+
+/** Why `auto` found nothing: the run would need an image's own root, which only a sandbox gives it. */
+export const NO_SANDBOX = "no sandbox starts here (bubblewrap, a user namespace and proot were each tried with a run's flags). Install bubblewrap, or allow unprivileged user namespaces, so jobs get their image as /. Until then this machine claims nothing. process.sandbox \"plain\" runs only self-contained images.";
 
 /**
  * The argv of a sandbox, without the job's environment (that travels in the
  * child process's environment, never in argv). `rootfs` is the private copy
  * of the image. `uid`/`gid` are the ids inside the sandbox.
  */
-export function sandboxLaunch({ kind, bins, rootfs, workdir, command, loaderEnv = {}, network, uid = 0, gid = 0, pathEnv = null }) {
+export function sandboxLaunch({
+  kind, bins, rootfs, workdir, command, loaderEnv = {}, network, uid = 0, gid = 0, pathEnv = null,
+  options = {}, readOnlyRoot = false, statusFd = true,
+}) {
   if (!command?.length) throw new Error("the image has no command");
   if (kind === "bwrap") {
     const args = [
-      "--unshare-user", "--unshare-pid", "--unshare-uts", "--unshare-ipc",
+      "--unshare-user", ...(options.pidns === false ? [] : ["--unshare-pid"]), "--unshare-uts", "--unshare-ipc",
       "--uid", String(uid), "--gid", String(gid),
       "--die-with-parent", "--new-session", "--hostname", "home-compute",
       "--chdir", workdir,
-      "--bind", rootfs, "/",
+      readOnlyRoot ? "--ro-bind" : "--bind", rootfs, "/",
       "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
-      "--json-status-fd", "3",
+      ...(statusFd ? ["--json-status-fd", "3"] : []),
     ];
     if (network === "none") args.push("--unshare-net");
     // Loader variables are applied to the job, not to bwrap, so an image's
     // LD_LIBRARY_PATH cannot point bwrap at the image's libraries.
     for (const [name, value] of Object.entries(loaderEnv)) args.push("--setenv", name, value);
     args.push("--", ...command);
-    return { file: bins.bwrap, args, cwd: rootfs, statusFd: true };
+    return { file: bins.bwrap, args, cwd: rootfs, statusFd };
   }
   if (kind === "userns") {
     const args = ["--user", "--map-root-user", "--mount", "--pid", "--fork", "--mount-proc"];
@@ -98,22 +111,38 @@ export function splitLoaderEnv(env) {
   return { inherit, loader };
 }
 
-const PROBES = {
-  async bwrap(bin) {
-    await runCommand(bin, ["--unshare-user", "--die-with-parent", "--ro-bind", "/", "/", "--", "/bin/true"], { timeoutMs: 20_000 });
-  },
-  async userns(bin) {
-    await runCommand(bin, ["--user", "--map-root-user", "--mount", "--pid", "--fork", "--mount-proc", "/bin/true"], { timeoutMs: 20_000 });
-  },
-  async proot(bin) {
-    await runCommand(bin, ["-0", "/bin/true"], { timeoutMs: 20_000 });
-  },
-};
+/**
+ * What `auto` tries, best first. A probe runs /bin/true the way a run would
+ * start (this machine's root read-only, standing in for the image), so a
+ * helper that starts but cannot mount what a run needs is not chosen.
+ */
+const CANDIDATES = [
+  { kind: "bwrap", options: { pidns: true } },
+  { kind: "bwrap", options: { pidns: false }, warning: SANDBOX_WARNING.nopid },
+  { kind: "userns", options: {} },
+  { kind: "proot", options: {} },
+];
+
+async function probe({ kind, options }, tools) {
+  const run = (launch) => runCommand(launch.file, launch.args, { timeoutMs: 20_000 });
+  if (kind === "bwrap") {
+    await run(sandboxLaunch({ kind, bins: tools, rootfs: "/", workdir: "/", command: ["/bin/true"], network: "bridge", options, readOnlyRoot: true, statusFd: false }));
+    return;
+  }
+  if (kind === "userns") {
+    // The run's flags, with this machine's root for the image's.
+    await run({ file: tools.unshare, args: ["--user", "--map-root-user", "--mount", "--pid", "--fork", "--mount-proc", "--root", "/", "--wd", "/", "--", "/bin/true"] });
+    return;
+  }
+  await run({ file: tools.proot, args: ["-r", "/", "-w", "/", "-b", "/proc", "-b", "/dev", "-0", "--", "/bin/true"] });
+}
 
 /**
  * The best sandbox that actually starts. `preference` is `auto` or one kind.
- * A named kind that does not start is reported as `plain` with `missing`, so
- * the caller can fail a request for that kind and still describe the fallback.
+ * When nothing usable is found (`auto` with no helper that starts, or a named
+ * kind that does not), the answer has `missing` and a warning that says why;
+ * the runtime then refuses to start runs, and the agent claims none. `plain`
+ * is only ever the answer when it is the preference.
  */
 export async function detectSandbox({ preference = "auto", bins, platform = process.platform } = {}) {
   const tools = {
@@ -122,24 +151,20 @@ export async function detectSandbox({ preference = "auto", bins, platform = proc
     proot: bins?.proot ?? "proot",
   };
   if (platform !== "linux") {
-    return { kind: "plain", bins: tools, warning: "the process runtime sandboxes jobs on Linux; this machine is not Linux", missing: preference !== "auto" && preference !== "plain" };
+    return { kind: "none", bins: tools, options: {}, warning: "the process runtime sandboxes jobs on Linux; this machine is not Linux", missing: true };
   }
-  const order = preference === "auto" ? ["bwrap", "userns", "proot"] : [preference];
-  for (const kind of order) {
-    if (kind === "plain") return { kind: "plain", bins: tools, warning: SANDBOX_WARNING.plain };
-    const bin = kind === "userns" ? tools.unshare : tools[kind];
+  if (preference === "plain") return { kind: "plain", bins: tools, options: {}, warning: SANDBOX_WARNING.plain };
+  const order = preference === "auto" ? CANDIDATES : CANDIDATES.filter((candidate) => candidate.kind === preference);
+  for (const candidate of order) {
     try {
-      await PROBES[kind](bin);
-      return { kind, bins: tools, warning: SANDBOX_WARNING[kind] ?? null };
+      await probe(candidate, tools);
+      return { kind: candidate.kind, bins: tools, options: candidate.options, warning: candidate.warning ?? SANDBOX_WARNING[candidate.kind] ?? null };
     } catch {
       // Try the next one. The reason is in the warning when nothing works.
     }
   }
-  return {
-    kind: "plain", bins: tools,
-    warning: SANDBOX_WARNING.plain,
-    missing: preference !== "auto" && preference !== "plain",
-  };
+  const warning = preference === "auto" ? NO_SANDBOX : `sandbox ${preference} does not start here with a run's flags`;
+  return { kind: "none", bins: tools, options: {}, warning, missing: true };
 }
 
 /** Whether this process may create a cgroup and set memory or CPU on it. Most nested containers may not. */

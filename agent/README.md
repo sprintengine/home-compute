@@ -14,7 +14,7 @@ Four runtimes implement the `ContainerRuntime` interface of
 | --- | --- | --- |
 | `docker` | Docker Engine on Linux or WSL, Docker Desktop | The `docker` CLI pulls, runs, stops and removes; the Engine API over the same unix socket answers inspect, wait, stats, ping and info. |
 | `colima` | macOS | The same, inside a Colima VM of the agent's own profile (`home-compute`), which it starts when work is due, sizes for it and stops when idle (§4.4). |
-| `process` | Linux with no Docker daemon | Pulls the OCI image with the registry HTTP API, unpacks it, and runs its entrypoint as a process. bubblewrap, a user namespace or proot confines it when one of them starts; otherwise the process runs directly and `doctor` warns. |
+| `process` | Linux with no Docker daemon | Pulls the OCI image with the registry HTTP API, unpacks it, and runs its entrypoint as a process. bubblewrap, a user namespace or proot gives it the image as `/`; with none of them the machine claims nothing (`doctor` says why). |
 | `fake` | tests, trying the agent without a runtime | Containers that follow a script instead of running an image. |
 
 It is Node 22, ESM, with no runtime dependencies. `npm run build:agent` (from
@@ -124,8 +124,15 @@ Docker daemon, uses `--runtime process`. Images stay the way a job is
 shipped. The agent pulls the OCI image itself and runs it as a process.
 Install bubblewrap (`apt-get install bubblewrap` or `dnf install
 bubblewrap`) so jobs get a user namespace, a pid namespace and the image's
-root filesystem; without it `doctor` warns and the job runs as an ordinary
-process. `ca-certificates` is what the registry HTTPS client trusts. The
+root filesystem. In a container that masks `/proc`, bubblewrap runs without
+the pid namespace, and `doctor` warns that a job then sees the machine's
+processes. bubblewrap needs unprivileged user namespaces; a container that
+refuses them (Docker's default seccomp and AppArmor profiles do) has no
+sandbox, and then **the machine claims nothing** and `doctor` fails: an
+image's programs need the image's own libraries and paths at `/`, so
+running them on the machine itself fails or, worse, uses the machine's
+files. `process.sandbox: "plain"` allows that for images built to run that
+way. `ca-certificates` is what the registry HTTPS client trusts. The
 state directory is `/var/lib/home-compute` (there is no `docker` group).
 Enrolment records the label `runtime=process`. A job that sets
 `placement.requireLabels.runtime` to `docker` is not sent here; a job with
@@ -225,7 +232,7 @@ temporary file, then a rename); `doctor` checks this.
 | `pullTimeoutSeconds` | `1200` | A pull taking longer fails the run (§3.6). |
 | `docker` | `{}` | `binary` (default `docker`, found on PATH); `host`, a `unix://` socket (default `DOCKER_HOST`, else the current docker context, else `/var/run/docker.sock`); `cgroupParent`, e.g. `"home-compute.slice"` on Linux (see Services). |
 | `colima` | `{}` | `profile` (default `home-compute`; never `default`), `binary`, `home` (COLIMA_HOME), `vmType` (`vz`), `diskGiB` (60; a disk only grows), `minCpus` (2), `minMemoryMiB` (2048), `startTimeoutSeconds` (600), `mountHome` (false: the VM sees none of your files), and `idleStopSeconds`/`keepWarmSeconds`, which override the control plane's `config` when set (0 idle: never stop). |
-| `process` | `{}` | `sandbox`: `auto` (default), `bwrap`, `userns`, `proot` or `plain`. `auto` uses the first of bubblewrap, util-linux `unshare` and proot that actually starts, and falls back to `plain` with a `doctor` warning. Naming a sandbox that cannot start makes `doctor` and the run fail. `cacheDir` (default `<state>/cache`) holds unpacked images and per-run rootfs copies. `keepImages` (3) is how many digests of one repository to keep. `bwrap`, `proot` and `unshare` name those binaries. `selfTestImage` and `selfTestArgs` are what `doctor` runs. |
+| `process` | `{}` | `sandbox`: `auto` (default), `bwrap`, `userns`, `proot` or `plain`. `auto` uses the first of bubblewrap, bubblewrap without a pid namespace, util-linux `unshare` and proot that starts with a run's flags; when none does, `doctor` fails and the machine claims nothing. `plain` (the entrypoint run on this machine, with its loader, root and paths) is only used when named, and suits only self-contained images. Naming a sandbox that cannot start makes `doctor` and the run fail. `cacheDir` (default `<state>/cache`) holds unpacked images and per-run rootfs copies. `keepImages` (3) is how many digests of one repository to keep. `bwrap`, `proot` and `unshare` name those binaries. `selfTestImage` and `selfTestArgs` are what `doctor` runs. |
 | `caffeinate` | `"auto"` | Hold `caffeinate -i -w <agent pid>` while a run is active or due on this machine soon: `"auto"` on a Mac with a real runtime, `true`, or `false`. |
 | `awakeAheadSeconds` | `900` | How long before a slot this machine is preferred for (or the only one for) the Mac is held awake. |
 | `fake` | `{}` | FakeRuntime's options: `script` (or `scripts` by job id or image), `vm` (`"stopped"` for a Colima-like host), `bootMs`, `pullMs`, `images`, `cpus`, `memoryMiB`, `diskFreeMiB`. |
@@ -272,8 +279,10 @@ report. Without one, a container prints one line and exits 0.
   reason, rather than unpacked wrong.
   Each run gets its own copy of the unpacked rootfs. bubblewrap is the
   sandbox when it starts (`--unshare-user`, a pid namespace, the image as
-  `/`); otherwise `unshare --user --map-root-user --root`, then proot, then
-  the process itself. `network none` drops the network with bubblewrap or
+  `/`), then bubblewrap without the pid namespace,
+  then `unshare --user --map-root-user --root`, then proot, each probed with
+  a run's flags; never the process itself unless `process.sandbox` is
+  `plain`. `network none` drops the network with bubblewrap or
   `unshare`; proot and plain mode share the machine's network, and `doctor`
   says so. `bridge` is the machine's own network namespace (there is no
   separate bridge). Memory and CPU limits are cgroup v2 when this process
