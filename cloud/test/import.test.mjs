@@ -42,7 +42,7 @@ describe("import", () => {
         id: v1.id, enabled: v1.enabled !== false, paused: false, preset: "wingfoil", revision: 1, image: IMAGE,
         args: v1.task.parameters ?? [], entrypoint: v1.task.entrypoint ?? null, labels: v1.labels,
         report: v1.task.report ?? null, network: "bridge",
-        placement: { requireLabels: { pool: "wingfoil" }, preferMachines: ["mac-mini"], preferWaitSeconds: 300 },
+        placement: { requireLabels: { runtime: "cloudflare-container" } },
         registryAuth: "vault:ghcr-read",
         timeouts: { runSeconds: v1.task.timeouts.totalSeconds - v1.task.timeouts.queueSeconds, maxLatenessSeconds: null },
       });
