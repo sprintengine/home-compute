@@ -1,0 +1,66 @@
+# Conventional Commits (title and each commit), the pull request body, and
+# the merge-commit-only policy. `edited` is listed on purpose: the default
+# pull_request types do not re-run when the title or body changes.
+name: Conventions
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  conventional-commits:
+    name: conventional commits
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check the pull request title and commit subjects
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/conventions.mjs commits
+
+  pull-request-description:
+    name: pull request description
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check Summary, Why, What changed, and Testing
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: node scripts/conventions.mjs body
+
+  merge-strategy:
+    name: merge strategy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # GitHub only returns allow_merge_commit and the related fields to a token
+    # with push access. contents: write is what makes the read succeed; the
+    # checkout does not keep that credential.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Require merge commits that use the pull request title and body
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: node scripts/conventions.mjs merge-strategy

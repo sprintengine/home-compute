@@ -163,6 +163,18 @@ test("the commits command fails the process when the title is not conventional",
   assert.match(result.stderr, /Pull request title/);
 });
 
+test("the workflow re-checks titles and bodies, and can read merge settings", () => {
+  const yaml = readFileSync(path.join(ROOT, ".github/workflows/conventions.yml"), "utf8");
+  for (const event of ["opened", "edited", "synchronize", "reopened", "ready_for_review"]) {
+    assert.ok(yaml.includes(event), event);
+  }
+  assert.match(yaml, /name: conventional commits/);
+  assert.match(yaml, /name: pull request description/);
+  assert.match(yaml, /name: merge strategy/);
+  assert.match(yaml, /contents: write/);
+  assert.match(yaml, /persist-credentials: false/);
+});
+
 test("the template is empty of real text, and CONTRIBUTING documents the merge settings", () => {
   const template = readFileSync(path.join(ROOT, ".github/pull_request_template.md"), "utf8");
   const errors = checkBody(template);
