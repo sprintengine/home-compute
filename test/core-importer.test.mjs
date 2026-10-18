@@ -54,7 +54,8 @@ test("every Wingfoil job imports with its timetable, resources, timeouts and env
     // The stale-output alert: each model's limit and published pointer, from the preset by the job's `models` label.
     if (job.report) assert.deepEqual(Object.keys(freshness), [v1.labels.models], v1.id);
     assert.deepEqual(job.labels, v1.labels);
-    assert.deepEqual(job.placement, { preferMachines: ["mac-mini"], preferWaitSeconds: 300 });
+    assert.deepEqual(job.placement, { requireLabels: { pool: "wingfoil" }, preferMachines: ["mac-mini"], preferWaitSeconds: 300 });
+    assert.equal(job.registryAuth, "vault:ghcr-read");
     assert.deepEqual([job.policy.overlap, job.policy.catchUp, job.policy.retry.onLostRunning], ["coalesce", "latest", true]);
     assert.equal(job.network, "bridge");
     // Secrets are references to the vault; plain values come only from the preset.
