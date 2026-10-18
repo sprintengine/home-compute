@@ -82,6 +82,18 @@ describe("Access JWT validation", () => {
   it("refuses everything when Access is not configured", async () => {
     await expect(verifyAccessJwt(await mintJwt(userClaims(OWNER)), accessSettings({}))).rejects.toThrow(/not configured/);
   });
+
+  it("strips any URL scheme and trailing slashes from the team domain", () => {
+    const host = "team.cloudflareaccess.com";
+    for (const team of [host, `https://${host}`, `http://${host}/`, `HTTPS://${host}//`]) {
+      expect(accessSettings({ ACCESS_TEAM_DOMAIN: team, ACCESS_AUD: " aud-tag " })).toEqual({
+        team: host,
+        audience: "aud-tag",
+        issuer: `https://${host}`,
+        certsUrl: `https://${host}/cdn-cgi/access/certs`,
+      });
+    }
+  });
 });
 
 describe("hc-web authentication and roles", () => {

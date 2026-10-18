@@ -19,16 +19,14 @@
       "database_id": "4733103a-34c8-4bfe-b81b-136c0e729713",
       "migrations_dir": "migrations"
     }
-  ],
-  "vars": {
-    // The Access team hostname (no scheme); the issuer is https://<this>. The application's AUD tag.
-    "ACCESS_TEAM_DOMAIN": "aged-forest-b17f.cloudflareaccess.com",
-    "ACCESS_AUD": "a3454d1c54793c8262765776cc0c0fc487427e912fe20319e890fe390831faaf"
-  }
+  ]
   // Secrets (wrangler secret put NAME -c wrangler.web.jsonc; locally .dev.vars), kept out of
-  // this file because they are either secret or the owner's own:
-  //   CSRF_KEY          32+ random bytes for the dashboard's CSRF tokens.
-  //   BOOTSTRAP_ADMINS  comma-separated emails that are admins before any `roles` setting exists.
-  //   CORE_URL          hc-core's URL, shown in the enrol command that comes with a join token.
-  //   VAULT_PUBLIC_KEY  the vault's RSA-OAEP public key (SPKI, base64); hc-web can only encrypt.
+  // this file because they are either secret or the owner's own. A plain var of the same
+  // name cannot exist: wrangler deploy replaces vars from this file, and secrets survive it.
+  //   CSRF_KEY            32+ random bytes for the dashboard's CSRF tokens.
+  //   BOOTSTRAP_ADMINS    comma-separated emails that are admins before any `roles` setting exists.
+  //   CORE_URL            hc-core's URL, shown in the enrol command that comes with a join token.
+  //   VAULT_PUBLIC_KEY    the vault's RSA-OAEP public key (SPKI, base64); hc-web can only encrypt.
+  //   ACCESS_TEAM_DOMAIN  the Access team hostname (`<team>.cloudflareaccess.com`). A pasted URL is accepted: any scheme and trailing slashes are stripped, and the issuer is `https://<host>`.
+  //   ACCESS_AUD          the Access application's AUD tag.
 }
