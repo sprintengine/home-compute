@@ -60,6 +60,15 @@ of the last 7 days (`npx wrangler d1 time-travel restore home-compute
 4. hc-core's `ALERT_EMAIL_TO` (a verified Email Routing destination), `ALERT_EMAIL_FROM` (an address on a zone with Email Routing on) and `DASHBOARD_URL`; hc-web's `CSRF_KEY` (48 random bytes), `BOOTSTRAP_ADMINS` (the owner's email) and `CORE_URL`.
 5. Deploy both Workers, then import (§4) and enrol the agent (§6).
 
+## 2a. Cloudflare Containers (optional, one job at a time)
+
+Not part of the deploy above. Containers need the Workers Paid plan, an image
+in Cloudflare's registry, and a job whose placement is
+`runtime=cloudflare-container`. The checklist, the `basic` size, the cost
+upper bound and the limits are [cloudflare-containers.md](cloudflare-containers.md).
+Drain the machine named `cloudflare` to stop new container runs. Do not add an
+R2 binding; jobs keep using S3 keys as vault secrets.
+
 ## 3. Signing in: Cloudflare Access (owner)
 
 `hc-web` refuses every `/v1` request until Access is set up (the dashboard's

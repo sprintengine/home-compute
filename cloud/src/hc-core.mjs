@@ -7,6 +7,8 @@ import { errorResponse, json } from "./http.mjs";
 import { CRON_STALE_MS } from "./alerts.mjs";
 import { minute } from "./cron.mjs";
 
+export { HcContainerBasic } from "./container-do.mjs";
+
 /**
  * GET /health: the Worker answers (200), with the cron's last tick. GET
  * /health/cron, for the dead-man check outside Cloudflare: 200 only while
@@ -49,8 +51,10 @@ export default {
   async scheduled(controller, env, ctx) {
     const summary = await minute(env, controller.scheduledTime);
     const alerts = summary.alerts ?? {};
+    const containers = summary.containers ?? {};
     if (summary.materialised.created || summary.lost || summary.retried || summary.timedOut || summary.retention
-      || alerts.error || alerts.opened || alerts.resolved || alerts.emailed) {
+      || alerts.error || alerts.opened || alerts.resolved || alerts.emailed
+      || containers.started || containers.failed || containers.error) {
       console.log(JSON.stringify({ event: "cron", cron: controller.cron, ...summary }));
     }
     return summary;

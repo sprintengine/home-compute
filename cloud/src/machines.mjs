@@ -5,6 +5,7 @@
 
 import { constantTimeEqual } from "../../src/core/csrf.mjs";
 import { newId } from "../../src/core/ids.mjs";
+import { CLOUDFLARE_RUNTIME } from "../../src/core/cloudflare.mjs";
 import { normaliseLabels } from "../../src/core/job.mjs";
 import {
   JOIN_TOKEN, MACHINE_NAME, newCredential, newJoinToken, parseCredential, sha256Hex,
@@ -17,6 +18,12 @@ const MAX_JOIN_TOKEN_TTL_MS = 24 * 60 * 60_000;
 /** Credentials older than this are rotated on a sync (§5); the dashboard can ask sooner. */
 export const ROTATE_AFTER_MS = 90 * 86_400_000;
 export const CAPABILITIES = ["provisioner"];
+
+function rejectReservedRuntime(labels) {
+  if (labels?.runtime === CLOUDFLARE_RUNTIME) {
+    throw new HttpError(400, "runtime=cloudflare-container is reserved for the Cloudflare Containers executor");
+  }
+}
 
 function unauthorized(code = "unauthorized") {
   const error = new HttpError(401, code);
@@ -66,6 +73,7 @@ export async function joinTokenStatements(db, { name, labels, capabilities, ttlM
   }
   const machineName = name === undefined || name === null ? null : checkMachineName(name);
   const tokenLabels = normaliseLabels(labels ?? {}, "labels");
+  rejectReservedRuntime(tokenLabels);
   const tokenCapabilities = checkCapabilities(capabilities);
   const token = newJoinToken();
   const expiresAt = now + ttlMs;
@@ -110,6 +118,7 @@ export async function enrol(db, { joinToken, name, facts }, { now, ip }) {
     throw new HttpError(409, `A machine called ${machineName} is enrolled; revoke it first or use another name`);
   }
   const labels = normaliseLabels({ ...factLabels(facts), ...JSON.parse(token.labels_json ?? "{}") }, "labels");
+  rejectReservedRuntime(labels);
   const machineId = newId("m", now);
   const credential = newCredential(machineId);
   const statements = [];

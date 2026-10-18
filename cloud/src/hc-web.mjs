@@ -8,6 +8,7 @@ import {
   accessSettings, AccessError, allows, csrfTokenFor, identityOf, roleOf, verifyAccessJwt,
 } from "./access.mjs";
 import * as api from "./api.mjs";
+import { getContainers } from "./containers.mjs";
 import * as fleet from "./fleet-api.mjs";
 import * as vault from "./secrets.mjs";
 import { alertState, testAlertStatements } from "./alerts.mjs";
@@ -41,6 +42,7 @@ export const ROUTES = [
   ["GET", `/v1/runs/${RUN}/logs`, "viewer", api.runLogs],
   ["POST", `/v1/runs/${RUN}/cancel`, "operator", api.cancelRun],
   ["POST", `/v1/runs/${RUN}/retry`, "operator", api.retryRun],
+  ["GET", "/v1/containers", "viewer", getContainers],
   ["GET", "/v1/machines", "viewer", fleet.listMachines],
   ["GET", `/v1/machines/${MACHINE}`, "viewer", fleet.getMachine],
   ["GET", `/v1/machines/${MACHINE}/runs`, "viewer", fleet.machineRuns],

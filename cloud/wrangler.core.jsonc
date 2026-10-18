@@ -21,10 +21,30 @@
       "database_id": "4733103a-34c8-4bfe-b81b-136c0e729713",
       "migrations_dir": "migrations"
     }
-  ]
+  ],
+  // Container stdout and the cron's own logs. Workers Logs is billed; see docs/cloudflare-containers.md.
+  "observability": { "enabled": true, "logs": { "enabled": true, "invocation_logs": true }, "traces": { "enabled": true } },
+  // One container class per instance type. `basic` is the only one deployed, so a trial cannot
+  // start a larger size by accident. The image is a placeholder Dockerfile, not a workload:
+  // before a real job, push linux/amd64 and set this `image` to the same
+  // registry.cloudflare.com/<account>/<repo>@sha256:… digest as the HC_CONTAINER_IMAGE secret.
+  // max_instances is the hard cap and must be raised together with settings.cloudflare.maxConcurrent.
+  "containers": [
+    {
+      "class_name": "HcContainerBasic",
+      "image": "./containers/placeholder.Dockerfile",
+      "instance_type": "basic",
+      "max_instances": 1
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "HC_CONTAINER_BASIC", "class_name": "HcContainerBasic" }]
+  },
+  "migrations": [{ "tag": "v1-cloudflare-containers", "new_sqlite_classes": ["HcContainerBasic"] }]
   // Secrets (wrangler secret put NAME -c wrangler.core.jsonc), kept out of this file:
-  //   VAULT_PRIVATE_KEY  the vault's RSA-OAEP private key (PKCS #8, base64); only hc-core can open secrets.
-  //   ALERT_EMAIL_TO     the verified Email Routing destination alerts go to (the owner).
-  //   ALERT_EMAIL_FROM   the sender, on a zone with Email Routing enabled.
-  //   DASHBOARD_URL      hc-web's URL, linked from alert emails.
+  //   VAULT_PRIVATE_KEY    the vault's RSA-OAEP private key (PKCS #8, base64); only hc-core can open secrets.
+  //   ALERT_EMAIL_TO       the verified Email Routing destination alerts go to (the owner).
+  //   ALERT_EMAIL_FROM     the sender, on a zone with Email Routing enabled.
+  //   DASHBOARD_URL        hc-web's URL, linked from alert emails.
+  //   HC_CONTAINER_IMAGE   registry.cloudflare.com/<account>/<repo>@sha256:… of the image deployed above.
 }

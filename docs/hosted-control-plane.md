@@ -29,7 +29,7 @@ resources, a timeout, a schedule and placement. Wingfoil is a preset.
 
 | Question | Decision |
 | --- | --- |
-| Store | **D1** (one database, `--location weur`). Durable Objects are not used in v1. |
+| Store | **D1** (one database, `--location weur`). Durable Objects are not used in v1, except the optional Cloudflare Containers executor ([cloudflare-containers.md](cloudflare-containers.md)), which adds one SQLite-backed class on hc-core. |
 | Due runs | **Cron Trigger `* * * * *`** materialises slots. Agent syncs also materialise lazily. Both are idempotent through `UNIQUE(job_id, slot_at)`. |
 | Workers | **Two Workers, one codebase**: `hc-web` (dashboard + human API, behind Access) and `hc-core` (agent API + cron, per-machine tokens, never serves people). |
 | Agent language | **Node 22, one dependency-free ESM file**, sharing `src/core/` with the Workers. Go is deferred (§4.1). |

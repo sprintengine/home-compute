@@ -5,6 +5,7 @@
 // the compare-and-set claims together. Lazy materialisation adds a few more
 // only when a slot has come and the agent asked for work.
 
+import { targetsCloudflare } from "../../src/core/cloudflare.mjs";
 import { classifyLines } from "../../src/core/logs.mjs";
 import {
   claimBlockers, effectiveFree, fits, labelsMatch, nextSyncDelay, placementRefusal, preferredUntil, secretsRefused, subtract,
@@ -133,7 +134,7 @@ export function chooseClaims({ due, jobs, machine, machines, free, globalPause, 
   const events = [];
   for (const run of due) {
     const job = jobs.get(run.job_id);
-    if (!job) continue;
+    if (!job || targetsCloudflare(job)) continue;
     if (run.source !== "manual" && (!job.enabled || job.paused || globalPause)) continue;
     if (claimBlockers(job, secrets).length || secretsRefused(job, machine, secrets).length) continue;
     const refusal = placementRefusal(job, { preferredUntil: run.preferred_until }, machine, { machines, now });
@@ -160,6 +161,7 @@ function possibleJobs(jobs, machine, globalPause, secrets) {
   const any = [];
   const manual = [];
   for (const job of jobs.values()) {
+    if (targetsCloudflare(job)) continue;
     if (claimBlockers(job, secrets).length || secretsRefused(job, machine, secrets).length) continue;
     if (!labelsMatch(job.placement?.requireLabels, machine.labels)) continue;
     manual.push(job.id);
@@ -357,7 +359,7 @@ export async function sync(db, request, { machine: row, rotated, now, ip, env = 
   for (const state of scheduleRows) {
     if (state.next_due_at <= now) continue;
     const job = jobs.get(state.job_id);
-    if (!job || !job.enabled || job.paused || globalPause || claimBlockers(job, secrets).length) continue;
+    if (!job || targetsCloudflare(job) || !job.enabled || job.paused || globalPause || claimBlockers(job, secrets).length) continue;
     if (secretsRefused(job, machine, secrets).length) continue;
     if (!labelsMatch(job.placement?.requireLabels, machine.labels)) continue;
     const preferred = (job.placement?.preferMachines ?? []).includes(machine.name);

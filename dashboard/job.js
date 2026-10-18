@@ -4,7 +4,7 @@
 // and the run history, loaded a page at a time as it scrolls.
 
 import {
-  LOCAL_NAME, LOCAL_ZONE, clockIn, duration, jobState, labelsText, localScheduleText, memoryChoices, memoryHint, mib, modelRun, parseArgs,
+  CLOUDFLARE_INSTANCE_TYPES, LOCAL_NAME, LOCAL_ZONE, clockIn, duration, jobState, labelsText, localScheduleText, memoryChoices, memoryHint, mib, modelRun, parseArgs,
   parseLabels, peakMiB, phaseOf, pinnedImage, relative, runHref, scheduleText,
 } from "./lib.js";
 import {
@@ -213,6 +213,7 @@ function placementCard(job, definition) {
       }) }, "Edit") : null),
     draft ? placementForm(job, draft, machines) : facts([
       ["Needs labels", labelsText(placement.requireLabels) || "any machine"],
+      ...(placement.requireLabels?.runtime === "cloudflare-container" ? [["Runs on", "Cloudflare Containers"]] : []),
       ["Prefers", placement.preferMachines?.length ? placement.preferMachines.join(", ") : "no machine in particular"],
       ["Waits for it", placement.preferMachines?.length ? `${Math.round((placement.preferWaitSeconds ?? 300) / 60)} min, then any machine` : null],
     ]));
@@ -236,7 +237,8 @@ function placementForm(job, draft, machines) {
   };
   return h("form", { class: "form", onsubmit: submit },
     h("label", { class: "field" }, h("span", {}, "Required labels (key=value, comma-separated)"),
-      h("input", { type: "text", id: "pl-labels", value: draft.labels, autocomplete: "off", spellcheck: "false", placeholder: "arch=arm64", oninput: (event) => { draft.labels = event.target.value; } })),
+      h("input", { type: "text", id: "pl-labels", value: draft.labels, autocomplete: "off", spellcheck: "false", placeholder: "runtime=cloudflare-container", oninput: (event) => { draft.labels = event.target.value; } })),
+    h("p", { class: "muted small", id: "pl-cloudflare" }, "runtime=cloudflare-container runs the job as a Cloudflare Container, with no machine. Other labels must match that executor: arch=amd64, os=linux, site=cloudflare. Replace a label such as arch=arm64; do not add it beside the runtime."),
     h("fieldset", { class: "field" }, h("legend", {}, "Preferred machine"),
       names.length ? names.map((name) => h("label", { class: "check" }, h("input", { type: "checkbox", checked: draft.prefer.has(name),
         onchange: (event) => { if (event.target.checked) draft.prefer.add(name); else draft.prefer.delete(name); } }), name))
@@ -258,9 +260,13 @@ function resourcesCard(job, definition, runs) {
     h("div", { class: "row between" }, h("h2", { id: "rs-title", class: "card-title" }, "Resources"),
       can("operator") && !draft ? h("button", { class: "small-button", id: "rs-edit", onclick: () => startEditing({
         kind: "resources", job: job.id, cpus: String(resources.cpus ?? 1), memoryMiB: resources.memoryMiB, diskMiB: String(resources.diskMiB ?? ""),
+        instanceType: resources.instanceType ?? "",
       }) }, "Edit") : null),
     draft ? resourcesForm(job, draft, hint) : [
-      facts([["CPU", resources.cpus], ["Memory", mib(resources.memoryMiB)], ["Disk", mib(resources.diskMiB)]]),
+      facts([
+        ["CPU", resources.cpus], ["Memory", mib(resources.memoryMiB)], ["Disk", mib(resources.diskMiB)],
+        ["Instance", resources.instanceType || "default (basic on Cloudflare)"],
+      ]),
       h("p", { class: `muted small hint${hint.peak && hint.peak > resources.memoryMiB * 0.9 ? " warn" : ""}` }, hint.text),
     ]);
 }
@@ -273,7 +279,9 @@ function resourcesForm(job, draft, hint) {
     const diskMiB = Number(draft.diskMiB);
     if (!(cpus > 0 && cpus <= 64)) return toast("CPU is a number above 0, at most 64", { error: true });
     if (!Number.isInteger(diskMiB) || diskMiB < 1) return toast("Disk is whole MiB", { error: true });
-    save(`${job.id}:resources`, `/v1/jobs/${encodeURIComponent(job.id)}/resources`, { cpus, memoryMiB: draft.memoryMiB, diskMiB }, "Resources saved", { job: job.id });
+    save(`${job.id}:resources`, `/v1/jobs/${encodeURIComponent(job.id)}/resources`, {
+      cpus, memoryMiB: draft.memoryMiB, diskMiB, instanceType: draft.instanceType || null,
+    }, "Resources saved", { job: job.id });
   };
   return h("form", { class: "form", onsubmit: submit },
     h("fieldset", { class: "field" }, h("legend", {}, "Memory limit"),
@@ -282,8 +290,13 @@ function resourcesForm(job, draft, hint) {
       }, mib(size)))),
       h("p", { class: `small hint${low ? " warn" : " muted"}`, id: "rs-hint", "aria-live": "polite" },
         `${hint.text.replace(/; limit .*$/, "")}; limit ${mib(draft.memoryMiB)}`, low ? " · below the peak plus 10%: the run may be killed for memory" : "")),
+    h("label", { class: "field" }, h("span", {}, "Cloudflare instance type"),
+      h("select", { id: "rs-instance", value: draft.instanceType, onchange: (event) => { draft.instanceType = event.target.value; } },
+        h("option", { value: "" }, "Default (basic, when the job runs on Cloudflare)"),
+        ...CLOUDFLARE_INSTANCE_TYPES.map((name) => h("option", { value: name, selected: draft.instanceType === name }, name)))),
+    h("p", { class: "muted small" }, "basic is 1 GiB and 4 GB disk. A Cloudflare job must fit the type it names; a larger type has to be deployed on hc-core before a run can use it."),
     h("div", { class: "row" },
-      h("label", { class: "field narrow" }, h("span", {}, "CPU"), h("input", { type: "number", id: "rs-cpus", min: 0.25, max: 64, step: 0.25, value: draft.cpus, oninput: (event) => { draft.cpus = event.target.value; } })),
+      h("label", { class: "field narrow" }, h("span", {}, "CPU"), h("input", { type: "number", id: "rs-cpus", min: 0.0625, max: 64, step: 0.0625, value: draft.cpus, oninput: (event) => { draft.cpus = event.target.value; } })),
       h("label", { class: "field narrow" }, h("span", {}, "Disk (MiB)"), h("input", { type: "number", id: "rs-disk", min: 1, step: 1, value: draft.diskMiB, oninput: (event) => { draft.diskMiB = event.target.value; } }))),
     h("div", { class: "actions" },
       h("button", { class: "primary", type: "submit", disabled: isBusy(`${job.id}:resources`) }, "Save"),

@@ -337,8 +337,23 @@ export const MACHINE_STATUS = {
   revoked: { label: "Revoked", tone: "off", icon: "⊘" },
 };
 
-/** The VM in words: "running · 2 CPU 2 GiB · up 14 min", "stopped", or "no VM (Docker host)". */
+/** Keep in step with `INSTANCE_TYPES` in src/core/cloudflare.mjs. The dashboard does not import the Worker modules. */
+export const CLOUDFLARE_INSTANCE_TYPES = ["lite", "basic", "standard-1", "standard-2", "standard-3", "standard-4"];
+
+export function isCloudflareExecutor(machine) {
+  return machine?.labels?.runtime === "cloudflare-container";
+}
+
+/** The VM in words: "running · 2 CPU 2 GiB · up 14 min", "stopped", or "no VM (Docker host)". A Cloudflare executor has no VM. */
 export function vmText(machine, now = Date.now()) {
+  if (isCloudflareExecutor(machine)) {
+    const seconds = machine.facts?.containerSeconds30d;
+    const usd = machine.facts?.estimatedUsd30d;
+    const parts = ["Cloudflare Container"];
+    if (typeof seconds === "number") parts.push(`${seconds} container-seconds / 30d`);
+    if (typeof usd === "number") parts.push(`~$${usd < 0.01 ? usd.toFixed(4) : usd.toFixed(2)} before allotment`);
+    return parts.join(" · ");
+  }
   const vm = machine?.vm;
   if (!vm?.state) return "No VM: Docker on the host";
   const parts = [vm.state];
