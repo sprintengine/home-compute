@@ -4,9 +4,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { RUN_LABEL } from "../../src/core/protocol.mjs";
-import { FakeRuntime } from "../src/runtime/fake.mjs";
 import { ColimaRuntime } from "../src/runtime/colima.mjs";
 import { DockerCliRuntime } from "../src/runtime/docker-cli.mjs";
+import { FakeRuntime } from "../src/runtime/fake.mjs";
+import { ProcessRuntime } from "../src/runtime/process-runtime.mjs";
 import { assertRuntime, createRuntime } from "../src/runtime/runtime.mjs";
 
 const spec = (extra = {}) => ({
@@ -20,11 +21,12 @@ async function collect(handle) {
   return lines;
 }
 
-test("it implements the runtime interface; the configuration picks fake, docker or colima", () => {
+test("it implements the runtime interface; the configuration picks fake, docker, colima or process", () => {
   assertRuntime(new FakeRuntime());
   assert.throws(() => assertRuntime({ run() {} }), /lacks ensureReady/);
   assert.ok(createRuntime({ runtime: "fake" }) instanceof FakeRuntime);
   assert.ok(assertRuntime(createRuntime({ runtime: "docker" })) instanceof DockerCliRuntime);
+  assert.ok(assertRuntime(createRuntime({ runtime: "process", process: { sandbox: "plain" } })) instanceof ProcessRuntime);
   const colima = assertRuntime(createRuntime({ runtime: "colima", caps: { cpus: 2, memoryMiB: 3072 }, colima: { profile: "hc-x", minCpus: 1 } }));
   assert.ok(colima instanceof ColimaRuntime);
   assert.deepEqual([colima.profile, colima.caps, colima.min.cpus, colima.min.memoryMiB], ["hc-x", { cpus: 2, memoryMiB: 3072 }, 1, 2048]);

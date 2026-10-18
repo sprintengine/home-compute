@@ -490,12 +490,12 @@ export function pinnedImage(image, digest) {
 // ---------- Install commands (agent/README.md, "Install by hand")
 
 /**
- * The copy-paste commands that install the agent on a Mac or a Linux box and
- * enrol it with a join token, in three steps each: install, enrol, start the
- * service. The token is never in them: the enrol step (one line, pasted on
- * its own so the prompt does not swallow the next command) asks for it
- * without echo and hands it to the agent on stdin, so it is in no command
- * line and no shell history.
+ * The copy-paste commands that install the agent on a Mac, a Linux box with
+ * systemd, or a Linux box with no Docker daemon, and enrol it with a join
+ * token, in three steps each: install, enrol, start. The token is never in
+ * them: the enrol step (one line, pasted on its own so the prompt does not
+ * swallow the next command) asks for it without echo and hands it to the
+ * agent on stdin, so it is in no command line and no shell history.
  */
 export function installCommands(server, { allowImages = "ghcr.io/sprintengine/*" } = {}) {
   const url = server || "<hc-core URL>";
@@ -541,6 +541,26 @@ export function installCommands(server, { allowImages = "ghcr.io/sprintengine/*"
         "cd ~/home-compute && sudo cp agent/service/home-compute-agent.service agent/service/home-compute.slice /etc/systemd/system/",
         'sudo sed -i "s/@MEMORY_MAX@/6G/" /etc/systemd/system/home-compute.slice   # the most the jobs may use together',
         "sudo systemctl daemon-reload && sudo systemctl enable --now home-compute-agent",
+      ].join("\n") },
+    ],
+    linuxNodocker: [
+      { title: "Install", text: [
+        "# Needs bubblewrap, ca-certificates, git, sudo and Node 22+ for every user (not through nvm). No Docker daemon and no systemd.",
+        "git clone https://github.com/sprintengine/home-compute.git ~/home-compute",
+        "cd ~/home-compute && npm ci && npm run build:agent",
+        "sudo install -d /opt/home-compute/agent/current /opt/home-compute/node/bin",
+        "sudo install -m 0644 agent/dist/home-compute-agent.mjs /opt/home-compute/agent/current/",
+        "sudo install -m 0755 agent/service/home-compute-agent-foreground.sh /opt/home-compute/agent/current/",
+        'sudo ln -sf "$(command -v node)" /opt/home-compute/node/bin/node',
+        "sudo useradd --system --home-dir /var/lib/home-compute --shell /usr/sbin/nologin hcagent",
+        "sudo install -d -m 0700 -o hcagent -g hcagent /var/lib/home-compute",
+      ].join("\n") },
+      { title: "Enrol: paste this line on its own, then the token when asked", text:
+        `${ask} sudo -u hcagent ${linuxAgent} enrol --state-dir /var/lib/home-compute --server ${url} --join-token-stdin --runtime process --allow-images '${allowImages}'; unset HC_JOIN_TOKEN` },
+      { title: "Check, then run in the foreground", text: [
+        `sudo -u hcagent ${linuxAgent} doctor --state-dir /var/lib/home-compute`,
+        "# Foreground, for tini or a shell: exit 0 stops; any other exit restarts after 5s.",
+        "sudo -u hcagent /opt/home-compute/agent/current/home-compute-agent-foreground.sh",
       ].join("\n") },
     ],
   };

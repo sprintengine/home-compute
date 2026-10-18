@@ -237,7 +237,7 @@ test("forms: labels, extra arguments and pinning a tag to its digest", () => {
 
 test("install commands never carry the token and enrol from stdin, one step on its own", () => {
   const commands = installCommands("https://hc-core.example.workers.dev");
-  for (const os of ["macos", "linux"]) {
+  for (const os of ["macos", "linux", "linuxNodocker"]) {
     const [install, enrol, service] = commands[os];
     assert.doesNotMatch(install.text + service.text, /hcj_|join-token/);
     assert.equal(enrol.text.split("\n").length, 1, "the enrol step is one line, so its prompt reads the token and nothing else");
@@ -249,13 +249,16 @@ test("install commands never carry the token and enrol from stdin, one step on i
   assert.match(commands.macos[2].text, /launchctl bootstrap gui\/\$\(id -u\)/);
   assert.match(commands.linux[1].text, /sudo -u hcagent .* --state-dir \/etc\/home-compute/);
   assert.match(commands.linux[2].text, /systemctl enable --now home-compute-agent/);
+  assert.match(commands.linuxNodocker[1].text, /--runtime process/);
+  assert.match(commands.linuxNodocker[1].text, /--state-dir \/var\/lib\/home-compute/);
+  assert.match(commands.linuxNodocker[2].text, /home-compute-agent-foreground.sh/);
   assert.match(installCommands(null).linux[1].text, /--server <hc-core URL>/);
 });
 
 test("agent/README.md's install by hand is what the dashboard shows", async () => {
   const readme = await readFile(path.resolve(import.meta.dirname, "../agent/README.md"), "utf8");
   const commands = installCommands("https://hc-core.<account>.workers.dev");
-  for (const step of [...commands.macos, ...commands.linux]) {
+  for (const step of [...commands.macos, ...commands.linux, ...commands.linuxNodocker]) {
     const indented = step.text.split("\n").map((line) => `   ${line}`).join("\n");
     assert.ok(readme.includes(indented), `the README has: ${step.title}`);
   }

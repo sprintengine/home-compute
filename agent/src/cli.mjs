@@ -10,15 +10,28 @@ import { Agent, jsonLog } from "./agent.mjs";
 import { createCaffeinate } from "./caffeinate.mjs";
 import { ControlPlaneClient } from "./client.mjs";
 import { enrol } from "./enrol.mjs";
+import { runProcessRunner } from "./runtime/process-runner.mjs";
 import { createRuntime } from "./runtime/runtime.mjs";
 import { defaultStateDir, StateDir } from "./state.mjs";
 import { startStatusServer } from "./status-server.mjs";
 import { AGENT_VERSION } from "./version.mjs";
 
+// The bundled agent is one file. A job's runner re-enters it with this set,
+// instead of a second program, and must not fall through into `run`.
+if (process.env.HC_PROCESS_RUNNER === "1") {
+  try {
+    await runProcessRunner();
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    process.exitCode = 1;
+  }
+  process.exit(process.exitCode ?? 0);
+}
+
 const USAGE = `home-compute-agent ${AGENT_VERSION}
 
 Usage:
-  home-compute-agent enrol --server URL --join-token-stdin [--name NAME] [--runtime docker|colima|fake]
+  home-compute-agent enrol --server URL --join-token-stdin [--name NAME] [--runtime docker|colima|process|fake]
                            [--allow-images 'ghcr.io/you/*,…'] [--allow-local-images] [--colima-profile NAME] [--reenrol]
   home-compute-agent run
   home-compute-agent status [--json]
@@ -245,6 +258,17 @@ async function checkRuntime(runtime, config, { report, live, startVm }) {
   if (config.runtime === "fake") {
     const facts = await runtime.facts();
     report("ok", `runtime ${facts.kind} ${facts.version}: ${facts.cpus} CPU, ${facts.memoryMiB} MiB, ${facts.diskFreeMiB} MiB disk free`);
+    return;
+  }
+  if (config.runtime === "process") {
+    await runtime.ensureReady();
+    const facts = await runtime.facts();
+    report("ok", `process runtime (${facts.version}): ${facts.cpus} CPU, ${facts.memoryMiB} MiB, ${facts.diskFreeMiB ?? "?"} MiB disk free; sandbox ${facts.sandbox}`);
+    if (facts.sandboxWarning) report("warn", facts.sandboxWarning);
+    if (facts.limitsWarning) report("warn", facts.limitsWarning);
+    if (facts.networkWarning) report("warn", facts.networkWarning);
+    const line = await runtime.selfTest();
+    report("ok", `process run works: "${line}"`);
     return;
   }
   let startedHere = false;

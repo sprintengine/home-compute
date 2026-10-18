@@ -12,7 +12,8 @@ import path from "node:path";
 
 export const DEFAULT_STATUS_PORT = 4787;
 const LOG_KEEP_MS = 7 * 86_400_000;
-export const RUNTIMES = ["fake", "docker", "colima"];
+export const RUNTIMES = ["fake", "docker", "colima", "process"];
+const SANDBOXES = ["auto", "bwrap", "userns", "proot", "plain"];
 
 /** What a configuration holds, with its defaults (README.md lists each field). */
 export const DEFAULT_CONFIG = {
@@ -30,6 +31,7 @@ export const DEFAULT_CONFIG = {
   pullTimeoutSeconds: 1200,
   docker: {},
   colima: {},
+  process: {},
   caffeinate: "auto",
   fake: {},
 };
@@ -92,8 +94,11 @@ function checkConfig(config) {
   if (!Number.isInteger(config.statusPort) || config.statusPort < 0 || config.statusPort > 65_535) {
     throw new Error("statusPort must be a port number (0 to turn the status server off)");
   }
-  for (const section of ["docker", "colima", "caps"]) {
+  for (const section of ["docker", "colima", "caps", "process"]) {
     if (config[section] === null || typeof config[section] !== "object" || Array.isArray(config[section])) throw new Error(`${section} must be an object`);
+  }
+  if (config.process.sandbox !== undefined && !SANDBOXES.includes(config.process.sandbox)) {
+    throw new Error(`process.sandbox must be one of ${SANDBOXES.join(", ")}`);
   }
   for (const key of COLIMA_NUMBERS) {
     const value = config.colima[key];
