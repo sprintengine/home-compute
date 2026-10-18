@@ -7,12 +7,15 @@
 import { spawn } from "node:child_process";
 import { createWriteStream } from "node:fs";
 import { readFile, rename, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { readFileSync } from "node:fs";
 import { descendants, readProcStat, sampleTree, signalGroup } from "./sandbox.mjs";
 
 const HELPERS = new Set(["bwrap", "proot", "unshare"]);
 const WATCH_MS = 200;
+/** A job's CPU priority, as Docker's `--cpu-shares 256` lowers a container's: the machine's own work comes first. */
+export const JOB_NICE = 10;
 
 function comm(pid) {
   try { return readFileSync(`/proc/${pid}/comm`, "utf8").trim(); } catch { return ""; }
@@ -107,7 +110,13 @@ function streamEnded(stream) {
   });
 }
 
-async function applyCgroup(dir, pid, limits) {
+/**
+ * Sets the run cgroup's limits and moves `pid` into it. The runner moves
+ * itself before it starts the sandbox, so the helper, the job and everything
+ * the job forks are created inside it; moving the helper afterwards would
+ * leave the job, which the helper has already forked, outside.
+ */
+export async function applyCgroup(dir, pid, limits) {
   if (!dir) return false;
   try {
     if (limits.memoryBytes) await writeFile(path.join(dir, "memory.max"), String(limits.memoryBytes));
@@ -150,6 +159,15 @@ export async function runProcessRunner() {
   const env = await readStdinEnv();
   const log = createWriteStream(launch.log, { flags: "a" });
   const note = createWriteStream(path.join(dir, "runner.log"), { flags: "a" });
+  const limits = launch.limits ?? {};
+  // Before the spawn, so the sandbox and the job inherit both.
+  const cgroupOn = await applyCgroup(launch.cgroup, process.pid, limits);
+  if (launch.cgroup && !cgroupOn) note.write("the run cgroup could not be joined; the memory watchdog enforces the limit\n");
+  try {
+    if (os.getPriority(0) < JOB_NICE) os.setPriority(0, JOB_NICE);
+  } catch {
+    // Lowering priority is best effort; a job still runs at the agent's.
+  }
   const stdio = ["ignore", "pipe", "pipe"];
   if (launch.statusFd) stdio.push("pipe");
   let child;
@@ -185,8 +203,6 @@ export async function runProcessRunner() {
   const sandboxPid = status?.["child-pid"] && readProcStat(status["child-pid"]) ? status["child-pid"] : child.pid;
   const jobPid = await resolveJobPid(sandboxPid);
   await writeFile(launch.jobPid ?? path.join(dir, "job.pid"), `${jobPid}\n`);
-  const limits = launch.limits ?? {};
-  const cgroupOn = await applyCgroup(launch.cgroup, child.pid, limits);
   let oom = false;
   let pids = false;
   const watch = setInterval(() => {

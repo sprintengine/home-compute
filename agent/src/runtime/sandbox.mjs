@@ -13,7 +13,7 @@
 
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rmdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { runCommand } from "./process.mjs";
@@ -181,7 +181,8 @@ export async function probeCgroup({ root = null } = {}) {
   } catch {
     return { kind: "watchdog", memory: false, cpu: false, base, warning: cgroupWarning(false, false) };
   } finally {
-    await rm(probe, { recursive: true, force: true }).catch(() => {});
+    // rmdir, not rm: a cgroup's control files cannot be unlinked, so a recursive rm leaves it behind.
+    await rmdir(probe).catch(() => {});
   }
 }
 

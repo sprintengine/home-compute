@@ -13,7 +13,9 @@ import path from "node:path";
 import test from "node:test";
 import { JOB_LABEL, RUN_LABEL } from "../../src/core/protocol.mjs";
 import { main } from "../src/cli.mjs";
-import { ProcessRuntime, processRefusal } from "../src/runtime/process-runtime.mjs";
+import { spawn } from "node:child_process";
+import { ProcessRuntime, processRefusal, removeCgroup } from "../src/runtime/process-runtime.mjs";
+import { JOB_NICE } from "../src/runtime/process-runner.mjs";
 import { NO_SANDBOX, detectSandbox, sandboxLaunch } from "../src/runtime/sandbox.mjs";
 import { tempState, until } from "./support.mjs";
 import { Readable } from "node:stream";
@@ -263,6 +265,38 @@ test("doctor reports the plain-sandbox warning and runs the self-test image", LI
   assert.match(text, /no sandbox/);
   assert.match(text, /network bridge shares this machine's network namespace/);
   assert.match(text, /process run works: "home-compute"/);
+});
+
+test("the runner joins the run's cgroup before it starts the job, and lowers the job's CPU priority", LINUX, async (t) => {
+  const runDir = await mkdtemp(path.join(os.tmpdir(), "hc-runner-"));
+  t.after(() => rm(runDir, { recursive: true, force: true }));
+  // A directory standing in for the cgroup: the job prints what cgroup.procs held when it started.
+  const cgroup = path.join(runDir, "cgroup");
+  await mkdir(cgroup);
+  const script = "const fs=require('fs'),os=require('os');console.log(fs.readFileSync(process.argv[1],'utf8').trim()+' '+os.getPriority(0))";
+  await writeFile(path.join(runDir, "launch.json"), JSON.stringify({
+    file: process.execPath, args: ["-e", script, path.join(cgroup, "cgroup.procs")], cwd: runDir,
+    log: path.join(runDir, "log"), jobPid: path.join(runDir, "job.pid"), statusFd: false,
+    limits: { memoryBytes: 256 * 1048576, cpus: 1, pids: 64 }, cgroup, sandbox: "plain",
+  }));
+  const runner = spawn(process.execPath, [path.resolve(import.meta.dirname, "../src/runtime/process-runner.mjs"), runDir], { stdio: ["pipe", "ignore", "inherit"] });
+  runner.stdin.end("PATH=/usr/bin:/bin\0");
+  await new Promise((resolve) => runner.once("exit", resolve));
+  const exit = JSON.parse(await readFile(path.join(runDir, "exit.json"), "utf8"));
+  assert.equal(exit.exitCode, 0);
+  const [procs, nice] = (await readFile(path.join(runDir, "log"), "utf8")).trim().split(" ");
+  assert.equal(Number(procs), runner.pid, "the job started inside the runner's cgroup");
+  assert.ok(Number(nice) >= JOB_NICE, `the job runs at nice ${nice}`);
+  assert.equal(await readFile(path.join(cgroup, "memory.max"), "utf8"), String(256 * 1048576));
+});
+
+test("a cgroup is removed with rmdir, which a recursive rm cannot do", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "hc-cgroup-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  assert.equal(await removeCgroup(path.join(dir, "gone")), true);
+  await mkdir(path.join(dir, "empty"));
+  assert.equal(await removeCgroup(path.join(dir, "empty")), true);
+  assert.equal(existsSync(path.join(dir, "empty")), false);
 });
 
 function capture() {

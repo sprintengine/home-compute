@@ -7,7 +7,7 @@
 
 import { spawn } from "node:child_process";
 import { closeSync, existsSync, openSync } from "node:fs";
-import { chmod, cp, mkdir, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, open, readFile, readdir, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -80,6 +80,31 @@ function cleanLine(raw) {
   const cr = text.lastIndexOf("\r");
   if (cr >= 0) text = text.slice(cr + 1);
   return text;
+}
+
+async function cgroupOomKilled(dir) {
+  if (!dir) return false;
+  const text = await readFile(path.join(dir, "memory.events"), "utf8").catch(() => "");
+  return Number(text.match(/oom_kill\s+(\d+)/)?.[1] ?? 0) > 0;
+}
+
+/**
+ * A cgroup is a directory only rmdir removes (its control files cannot be
+ * unlinked), and only once its last process has gone, so a just-killed
+ * runner gets a moment.
+ */
+export async function removeCgroup(dir, clock = systemClock) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      await rmdir(dir);
+      return true;
+    } catch (error) {
+      if (error.code === "ENOENT") return true;
+      if (error.code !== "EBUSY") return false;
+      await clock.sleep(50);
+    }
+  }
+  return false;
 }
 
 class ProcessJob {
@@ -158,6 +183,8 @@ class ProcessJob {
         await this.runtime.clock.sleep(200);
         const late = await readJson(exitPath);
         if (late) return { exitCode: late.exitCode ?? null, oomKilled: Boolean(late.oomKilled) };
+        // The runner shares the job's cgroup, so the kernel's OOM killer may have taken it rather than the job.
+        if (await cgroupOomKilled(this.meta.cgroup)) return { exitCode: 137, oomKilled: true };
         return { exitCode: null, oomKilled: false, gone: true };
       }
       await this.runtime.clock.sleep(50);
@@ -195,7 +222,7 @@ class ProcessJob {
     if (job) signalGroup(job, "SIGKILL");
     if (sandbox) signalGroup(sandbox, "SIGKILL");
     if (this.meta.runnerPid) signalGroup(this.meta.runnerPid, "SIGKILL");
-    if (this.meta.cgroup) await rm(this.meta.cgroup, { recursive: true, force: true }).catch(() => {});
+    if (this.meta.cgroup) await removeCgroup(this.meta.cgroup, this.runtime.clock);
     await rm(this.dir, { recursive: true, force: true });
   }
 

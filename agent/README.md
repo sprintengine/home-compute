@@ -286,9 +286,12 @@ report. Without one, a container prints one line and exits 0.
   `unshare`; proot and plain mode share the machine's network, and `doctor`
   says so. `bridge` is the machine's own network namespace (there is no
   separate bridge). Memory and CPU limits are cgroup v2 when this process
-  may create a child cgroup; otherwise a resident-set watchdog enforces the
-  memory limit (exit 137, `oomKilled`) and CPU is not hard-capped, which
-  `doctor` warns about. Logs are the process's stdout and stderr. Secret
+  may create a child cgroup (the job's runner joins it before the job
+  starts, so everything the job forks is inside); otherwise a resident-set
+  watchdog enforces the memory limit (exit 137, `oomKilled`) and CPU is not
+  hard-capped, which `doctor` warns about. Either way the job runs at nice
+  10, as Docker's `--cpu-shares 256` puts a container behind the machine's
+  own work. Logs are the process's stdout and stderr. Secret
   values are written to the runner's stdin and live in the job's
   environment, never in argv and never in the state directory. A name
   matching `LD_*`, `BWRAP_*` or `PROOT_*` is refused, because it would
