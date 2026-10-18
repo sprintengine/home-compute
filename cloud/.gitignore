@@ -2,3 +2,4 @@
 .dev.vars
 dist/
 .admin/
+wrangler.core.test-*.jsonc

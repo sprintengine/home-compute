@@ -6,7 +6,7 @@
 // Used by the dashboard's browser tests and its screenshot script.
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { createSign, generateKeyPairSync } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -99,15 +99,22 @@ export async function startDevStack() {
   const webProcess = startWrangler(["dev", "-c", "wrangler.web.jsonc", "--persist-to", state, "--port", String(webPort), "--ip", "127.0.0.1",
     "--inspector-port", String(webInspector), "--log-level", "warn", ...Object.entries(vars).flatMap(([name, value]) => ["--var", `${name}:${value}`])], quiet);
   let coreProcess = null;
+  // hc-core's config names the deployed registry.cloudflare.com image, and wrangler dev signs in to
+  // Cloudflare to resolve one even with containers off. A copy beside it (so its relative paths hold)
+  // names the placeholder Dockerfile instead, which needs no sign-in and is never built here.
+  const coreConfig = path.join(CLOUD, `wrangler.core.test-${process.pid}-${corePort}.jsonc`);
+  await writeFile(coreConfig, (await readFile(path.join(CLOUD, "wrangler.core.jsonc"), "utf8"))
+    .replace(/("image":\s*)"registry\.cloudflare\.com\/[^"]*"/g, '$1"./containers/placeholder.Dockerfile"'));
   const close = async () => {
     await Promise.all([stop(webProcess.child), coreProcess ? stop(coreProcess.child) : null]);
     await new Promise((resolve) => certs.close(resolve));
     await rm(state, { recursive: true, force: true });
+    await rm(coreConfig, { force: true });
   };
   try {
     await waitFor(`${web}/v1/health`, webProcess.output);
     // One at a time: two workerd processes opening the shared local D1 at once can fail to start with SQLITE_BUSY.
-    coreProcess = startWrangler(["dev", "-c", "wrangler.core.jsonc", "--persist-to", state, "--port", String(corePort), "--ip", "127.0.0.1",
+    coreProcess = startWrangler(["dev", "-c", coreConfig, "--persist-to", state, "--port", String(corePort), "--ip", "127.0.0.1",
       // No Docker needed: the Cloudflare container classes are not started under wrangler dev.
       "--inspector-port", String(coreInspector), "--log-level", "warn", "--test-scheduled", "--enable-containers=false"], quiet);
     await waitFor(`${core}/health`, coreProcess.output);
