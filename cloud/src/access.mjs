@@ -144,16 +144,50 @@ export function identityOf(claims) {
 
 export const ROLES = ["viewer", "operator", "admin"];
 
+/** Logins in BOOTSTRAP_ADMINS, lower-cased, in order, without duplicates. */
+export function bootstrapAdminList(value) {
+  const seen = new Set();
+  const admins = [];
+  for (const item of String(value ?? "").split(/[\s,]+/)) {
+    const login = item.trim().toLowerCase();
+    if (!login || seen.has(login)) continue;
+    seen.add(login);
+    admins.push(login);
+  }
+  return admins;
+}
+
 /**
  * A role by login, from the `roles` setting (`{"me@example.com": "admin",
- * "service:<client-id>": "operator"}`) and the BOOTSTRAP_ADMINS var (the
- * owner, before any settings exist). Anyone else Access let in has no role.
+ * "service:<client-id>": "operator"}`) and the BOOTSTRAP_ADMINS var.
+ * Bootstrap logins are always admin, whatever the map says. Anyone else
+ * Access let in has no role.
  */
 export function roleOf(login, { roles = {}, bootstrapAdmins = "" } = {}) {
-  const admins = String(bootstrapAdmins).split(/[\s,]+/).map((value) => value.trim().toLowerCase()).filter(Boolean);
-  if (admins.includes(login)) return "admin";
-  const role = roles?.[login] ?? Object.entries(roles ?? {}).find(([key]) => key.toLowerCase() === login)?.[1];
+  const name = String(login ?? "");
+  if (bootstrapAdminList(bootstrapAdmins).includes(name.toLowerCase())) return "admin";
+  const folded = name.toLowerCase();
+  const role = roles?.[name] ?? Object.entries(roles ?? {}).find(([key]) => String(key).toLowerCase() === folded)?.[1];
   return ROLES.includes(role) ? role : null;
+}
+
+/**
+ * Why `proposed` (a roles map already checked for shape) must be refused, or
+ * null when it is safe to store. Bootstrap admins stay admin even if the map
+ * omits them. The caller cannot drop their own admin role, and someone must
+ * remain admin.
+ */
+export function rolesRefusal(proposed, { actor, bootstrapAdmins = "" } = {}) {
+  const admins = bootstrapAdminList(bootstrapAdmins);
+  for (const [login, role] of Object.entries(proposed ?? {})) {
+    if (admins.includes(String(login).toLowerCase()) && role !== "admin") {
+      return `${login} is a bootstrap admin and always stays admin`;
+    }
+  }
+  const remains = admins.length > 0 || Object.values(proposed ?? {}).includes("admin");
+  if (!remains) return "At least one admin must remain";
+  if (roleOf(actor, { roles: proposed, bootstrapAdmins }) !== "admin") return "That would remove your own admin role";
+  return null;
 }
 
 export function allows(role, needed) {

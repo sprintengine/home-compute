@@ -286,7 +286,10 @@ tab bar at the bottom, and for a desktop with a sidebar.
 - **Timetable.** Every job on a 24-hour UTC grid with the Irish hour under
   each column (a list by hour on a phone), hourly and interval jobs on a
   line each, switched-off jobs folded.
-- **Settings and audit.** The global pause (operators), retention, the
-  agent version machines should run and roles (admins), who you are and
-  Access's sign-out; the audit log, newest first, loaded as it scrolls.
+- **Settings and audit.** The global pause (operators); retention and the
+  agent version machines should run (admins); roles (admins): add, change
+  or remove an email or `service:<client-id>` as viewer, operator or admin.
+  Bootstrap admins always stay admin, and a save that would remove your own
+  admin role or the last admin is refused. Who you are and Access's
+  sign-out; the audit log, newest first, loaded as it scrolls.
   Secrets get their page with the vault (M5).

@@ -711,7 +711,9 @@ policy allows the owner's email via Google/GitHub/one-time PIN. The Worker **val
 `Cf-Access-Jwt-Assertion` itself** (RS256 against `https://<team>.cloudflareaccess.com/cdn-cgi/access/certs`
 by `kid`, `iss`, and `aud` = the app's AUD tag), as Cloudflare's docs require, with the JWKS cached
 in the isolate. Roles are `admin`, `operator` (run/pause/drain/timetable) and `viewer`, mapped from
-email or service-token `common_name` in `settings`.
+email or service-token `common_name` in the `roles` setting. An admin edits that map from the
+dashboard (Settings › Roles) or `PATCH /v1/settings`. Logins in `BOOTSTRAP_ADMINS` always stay
+admin. The update is refused if it would remove the last admin or the caller's own admin role.
 
 **Non-browser clients** (CLI import, menu bar app, Studio module) use Access **service tokens**
 (`CF-Access-Client-Id/Secret`). Each has its own role; the menu bar app gets `operator`.

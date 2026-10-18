@@ -8,6 +8,7 @@ import { jobDifferences, normaliseJob } from "../../src/core/job.mjs";
 import { preferredUntil } from "../../src/core/placement.mjs";
 import { isTerminal, transition, TransitionError } from "../../src/core/run.mjs";
 import { applyTimetable, timetableChange } from "../../src/core/timetable.mjs";
+import { bootstrapAdminList, ROLES, rolesRefusal } from "./access.mjs";
 import { DEFAULT_RETENTION } from "./cron.mjs";
 import {
   auditStatement, bumpJobsVersion, initialLastSlot, JOB_COLUMNS, jobToRow, loadJob, openRuns, putSetting, readSettings,
@@ -434,13 +435,37 @@ function checkSettings(body) {
   if (body.desiredAgentVersion !== undefined && body.desiredAgentVersion !== null && !VERSION.test(String(body.desiredAgentVersion))) {
     throw new HttpError(400, "desiredAgentVersion must be a version like 0.2.0, or null");
   }
-  if (body.roles !== undefined) {
-    if (!body.roles || typeof body.roles !== "object" || Array.isArray(body.roles)) throw new HttpError(400, "roles must be an object");
-    for (const [login, role] of Object.entries(body.roles)) {
-      if (!/^(service:.+|[^\s@]+@[^\s@]+)$/.test(login)) throw new HttpError(400, `${login} is not an email or service:<client-id>`);
-      if (!["viewer", "operator", "admin"].includes(role)) throw new HttpError(400, `roles.${login} must be viewer, operator or admin`);
-    }
+  if (body.roles !== undefined) body.roles = normaliseRoles(body.roles);
+}
+
+/**
+ * The roles map as it is stored. An email is lower-cased (Access emails are).
+ * A service token keeps the client id's case (`service:<client-id>`). The same
+ * login twice, ignoring case, is refused.
+ */
+function normaliseRoles(roles) {
+  if (!roles || typeof roles !== "object" || Array.isArray(roles)) throw new HttpError(400, "roles must be an object");
+  const normalised = {};
+  const seen = new Set();
+  for (const [rawLogin, role] of Object.entries(roles)) {
+    const login = canonicalLogin(rawLogin);
+    if (!login) throw new HttpError(400, `${rawLogin} is not an email or service:<client-id>`);
+    const folded = login.toLowerCase();
+    if (seen.has(folded)) throw new HttpError(400, `${login} is listed more than once`);
+    if (!ROLES.includes(role)) throw new HttpError(400, `roles.${login} must be viewer, operator or admin`);
+    seen.add(folded);
+    normalised[login] = role;
   }
+  return normalised;
+}
+
+function canonicalLogin(raw) {
+  const text = String(raw ?? "").trim();
+  if (!text || text.length > 200) return null;
+  const service = /^service:(\S+)$/i.exec(text);
+  if (service) return `service:${service[1]}`;
+  const email = text.toLowerCase();
+  return /^[^\s@]+@[^\s@]+$/.test(email) ? email : null;
 }
 
 async function currentSettings(db) {
@@ -454,13 +479,21 @@ async function currentSettings(db) {
   };
 }
 
-export async function getSettings({ db }) {
-  return json(200, await currentSettings(db));
+function settingsResponse(stored, env, extra = {}) {
+  return { ...stored, bootstrapAdmins: bootstrapAdminList(env?.BOOTSTRAP_ADMINS), ...extra };
+}
+
+export async function getSettings({ db, env }) {
+  return json(200, settingsResponse(await currentSettings(db), env));
 }
 
 /** PATCH /v1/settings, and pause-all/resume-all (which only touch globalPause, as an operator may). */
-export async function patchSettings({ db, identity, ip, now }, body) {
+export async function patchSettings({ db, env, identity, ip, now }, body) {
   checkSettings(body);
+  if (body.roles !== undefined) {
+    const refusal = rolesRefusal(body.roles, { actor: identity.login, bootstrapAdmins: env?.BOOTSTRAP_ADMINS });
+    if (refusal) throw new HttpError(400, refusal);
+  }
   const before = await currentSettings(db);
   const proposed = Object.fromEntries(Object.keys(body).map((key) => [key, key === "retention" ? { ...before.retention, ...body.retention } : body[key]]));
   const changed = Object.keys(proposed).filter((key) => JSON.stringify(proposed[key]) !== JSON.stringify(before[key]));
@@ -476,7 +509,7 @@ export async function patchSettings({ db, identity, ip, now }, body) {
       bumpJobsVersion(db),
     ]);
   }
-  return json(200, { ...(await currentSettings(db)), changed });
+  return json(200, settingsResponse(await currentSettings(db), env, { changed }));
 }
 
 export async function importHandler({ db, request, url, identity, ip, now }) {

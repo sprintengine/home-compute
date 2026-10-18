@@ -31,8 +31,9 @@ curl "http://localhost:8788/__scheduled?cron=*+*+*+*+*"   # run one cron minute 
 
 Locally there is no Access in front, so `DEV_ACCESS_EMAIL` signs every request
 from `localhost` in as that person (list them in `BOOTSTRAP_ADMINS` to make
-them an admin). It is ignored for any other host name, so a deployed Worker
-never honours it; do not set it as a deployed var anyway.
+them an admin; those logins always stay admin). It is ignored for any other
+host name, so a deployed Worker never honours it; do not set it as a deployed
+var anyway.
 
 Import Wingfoil's timetable into the local Worker, then open the dashboard:
 
@@ -162,7 +163,7 @@ dashboard's `X-CSRF-Token`) from `GET /v1/session`.
 | `DELETE /v1/machines/:id` | admin | Revokes it: its next request gets 401. |
 | `POST /v1/join-tokens` | admin | `{name?, labels?, capabilities?, ttlMinutes?}` → `{token, expiresAt, server, enrolCommand}`, shown once. |
 | `POST /v1/pause-all` \| `/v1/resume-all` | operator | The global pause. |
-| `GET` \| `PATCH /v1/settings` | admin | `globalPause`, `retention`, `roles`, `desiredAgentVersion` (null: the newest any enrolled machine runs). |
+| `GET` \| `PATCH /v1/settings` | admin | `globalPause`, `retention`, `roles`, `desiredAgentVersion` (null: the newest any enrolled machine runs). `GET` also returns `bootstrapAdmins`, which is not a setting you can patch. |
 | `POST /v1/import?dryRun=1` | admin | `{config: {jobs}, preset, variables, force?, pause?}` → per-job diff. |
 | `GET /v1/audit?before=&limit=` | admin | Every mutation with before/after. |
 | `GET /v1/secrets` | admin | The vault: names, key ids, hints, allowed labels, the jobs using each, and names jobs need that are not set. Never a value. |
@@ -171,7 +172,15 @@ dashboard's `X-CSRF-Token`) from `GET /v1/session`.
 | `POST /v1/alerts/test` | admin | A test alert the next cron minute emails, then resolves. |
 
 Roles come from the `roles` setting (`{"me@example.com": "admin",
-"service:<client-id>": "operator"}`) plus the `BOOTSTRAP_ADMINS` var.
+"service:<client-id>": "operator"}`) plus the `BOOTSTRAP_ADMINS` var, whose
+logins are always admin even when the map omits them. `PATCH` with `roles`
+replaces that whole map. A key is an email (stored in lower case) or
+`service:<client-id>` (the client id keeps its case); a value is `viewer`,
+`operator` or `admin`. The change is refused, and not written or audited,
+when it would leave no admin, drop the caller's own admin role, or store a
+bootstrap admin as anything else. The dashboard edits the map under
+Settings › Roles. A browser's `PATCH`, like every other change, needs its
+CSRF token; a passing change is an audit row `settings.update`.
 
 ### Agent API (hc-core)
 

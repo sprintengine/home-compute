@@ -59,31 +59,26 @@ function adminSettings() {
   if (!loaded) return h("p", { class: "muted" }, "Loading settings…");
   if (loaded.error) return banner(`Could not load the settings: ${loaded.error}`);
   const settings = loaded.data;
+  return [retentionCard(settings), rolesCard(settings)];
+}
+
+function retentionCard(settings) {
   const draft = state.editing?.kind === "settings" ? state.editing : null;
   const start = () => {
     state.editing = {
       kind: "settings",
       retention: Object.fromEntries(RETENTION.map(([key]) => [key, String(settings.retention?.[key] ?? "")])),
       desiredAgentVersion: settings.desiredAgentVersion ?? "",
-      roles: Object.entries(settings.roles ?? {}).map(([login, role]) => ({ login, role })),
     };
     render();
   };
   if (!draft) {
-    return [
-      h("section", { class: "card", "aria-labelledby": "rt-title" },
-        h("div", { class: "row between" }, h("h2", { class: "card-title", id: "rt-title" }, "Retention and agents"), h("button", { class: "small-button", id: "settings-edit", onclick: start }, "Edit")),
-        facts([
-          ...RETENTION.map(([key, label]) => [label, settings.retention?.[key]]),
-          ["Agents should run", settings.desiredAgentVersion ?? "the newest version any machine runs"],
-        ])),
-      h("section", { class: "card", "aria-labelledby": "rl-title" },
-        h("h2", { class: "card-title", id: "rl-title" }, "Roles"),
-        Object.keys(settings.roles ?? {}).length
-          ? facts(Object.entries(settings.roles).map(([login, role]) => [login, role]))
-          : h("p", { class: "muted small" }, "Only the bootstrap admins (BOOTSTRAP_ADMINS) have a role."),
-        h("p", { class: "muted small" }, "Viewers see everything but change nothing; operators run, pause, drain and edit timetables, placement and resources; admins also edit images, machines, settings and join tokens.")),
-    ];
+    return h("section", { class: "card", "aria-labelledby": "rt-title" },
+      h("div", { class: "row between" }, h("h2", { class: "card-title", id: "rt-title" }, "Retention and agents"), h("button", { class: "small-button", id: "settings-edit", onclick: start }, "Edit")),
+      facts([
+        ...RETENTION.map(([key, label]) => [label, settings.retention?.[key]]),
+        ["Agents should run", settings.desiredAgentVersion ?? "the newest version any machine runs"],
+      ]));
   }
   const submit = async (event) => {
     event.preventDefault();
@@ -93,15 +88,10 @@ function adminSettings() {
       if (!Number.isInteger(value) || value < 1 || value > 3650) return toast(`${label}: a whole number from 1 to 3650`, { error: true });
       retention[key] = value;
     }
-    const roles = {};
-    for (const entry of draft.roles) {
-      if (!entry.login.trim()) continue;
-      roles[entry.login.trim().toLowerCase()] = entry.role;
-    }
     const version = draft.desiredAgentVersion.trim();
     await busy("settings", async () => {
       try {
-        const { data } = await api("/v1/settings", { method: "PATCH", body: { retention, roles, desiredAgentVersion: version || null } });
+        const { data } = await api("/v1/settings", { method: "PATCH", body: { retention, desiredAgentVersion: version || null } });
         state.settings = { data };
         state.editing = null;
         toast(data.changed?.length ? `Saved: ${data.changed.join(", ")}` : "Nothing changed");
@@ -112,20 +102,114 @@ function adminSettings() {
     });
   };
   return h("form", { class: "card form", onsubmit: submit, "aria-labelledby": "se-title", "data-edit": "settings" },
-    h("h2", { class: "card-title", id: "se-title" }, "Retention, agents and roles"),
+    h("h2", { class: "card-title", id: "se-title" }, "Retention and agents"),
     h("div", { class: "form-grid" }, RETENTION.map(([key, label]) => h("label", { class: "field" }, h("span", {}, label),
       h("input", { type: "number", min: 1, max: 3650, step: 1, id: `rt-${key}`, value: draft.retention[key], oninput: (event) => { draft.retention[key] = event.target.value; } })))),
     h("label", { class: "field narrow" }, h("span", {}, "Agents should run version (empty: the newest enrolled)"),
       h("input", { type: "text", id: "rt-version", value: draft.desiredAgentVersion, placeholder: "0.2.0", pattern: "\\d+\\.\\d+\\.\\d+", oninput: (event) => { draft.desiredAgentVersion = event.target.value; } })),
-    h("fieldset", { class: "field" }, h("legend", {}, "Roles"),
-      draft.roles.map((entry, index) => h("div", { class: "row role-row" },
-        h("input", { type: "text", value: entry.login, "aria-label": "Email or service:<client-id>", placeholder: "someone@example.com", oninput: (event) => { entry.login = event.target.value; } }),
-        h("select", { "aria-label": `Role for ${entry.login || "this login"}`, onchange: (event) => { entry.role = event.target.value; } },
-          ["viewer", "operator", "admin"].map((role) => h("option", { value: role, selected: role === entry.role }, role))),
-        h("button", { type: "button", class: "small-button", "aria-label": `Remove ${entry.login || "this row"}`, onclick: () => { draft.roles.splice(index, 1); render(); } }, "Remove"))),
-      h("button", { type: "button", class: "small-button", onclick: () => { draft.roles.push({ login: "", role: "viewer" }); render(); } }, "Add a login")),
     h("div", { class: "actions" },
       h("button", { class: "primary", type: "submit", disabled: isBusy("settings") }, "Save"),
+      h("button", { type: "button", onclick: () => { state.editing = null; render(); } }, "Cancel")));
+}
+
+const ROLE_NAMES = ["viewer", "operator", "admin"];
+
+/** An email (lower case, as Access reports it) or `service:<client-id>` with the client id's case kept. Blank is skipped. */
+function canonicalLogin(raw) {
+  const text = String(raw ?? "").trim();
+  if (!text) return "";
+  const service = /^service:(\S+)$/i.exec(text);
+  const login = service ? `service:${service[1]}` : text.toLowerCase();
+  if (text.length > 200 || (!service && !/^[^\s@]+@[^\s@]+$/.test(login))) {
+    throw new Error(`${text} is not an email or service:<client-id>`);
+  }
+  return login;
+}
+
+function sameLogin(left, right) {
+  return String(left).toLowerCase() === String(right).toLowerCase();
+}
+
+function rolesCard(settings) {
+  const draft = state.editing?.kind === "roles" ? state.editing : null;
+  const bootstrap = settings.bootstrapAdmins ?? [];
+  const start = () => {
+    state.editing = {
+      kind: "roles",
+      roles: Object.entries(settings.roles ?? {})
+        .filter(([login]) => !bootstrap.some((admin) => sameLogin(admin, login)))
+        .map(([login, role]) => ({ login, role })),
+    };
+    render();
+  };
+  if (draft) return rolesForm(settings, draft, bootstrap);
+  const grants = Object.entries(settings.roles ?? {}).filter(([login]) => !bootstrap.some((admin) => sameLogin(admin, login)));
+  const rows = [
+    ...bootstrap.map((login) => [login, "admin · always"]),
+    ...grants.map(([login, role]) => [login, role]),
+  ];
+  return h("section", { class: "card", "aria-labelledby": "rl-title" },
+    h("div", { class: "row between" },
+      h("h2", { class: "card-title", id: "rl-title" }, "Roles"),
+      h("button", { class: "small-button", id: "roles-edit", onclick: start }, "Edit")),
+    rows.length
+      ? facts(rows)
+      : h("p", { class: "muted small" }, "Only the bootstrap admins (BOOTSTRAP_ADMINS) have a role."),
+    h("p", { class: "muted small" }, "Viewers see everything but change nothing; operators run, pause, drain and edit timetables, placement and resources; admins also edit images, machines, settings and join tokens. Add an email or a service token as service:<client-id>."));
+}
+
+function rolesForm(settings, draft, bootstrap) {
+  const submit = async (event) => {
+    event.preventDefault();
+    const roles = {};
+    try {
+      for (const entry of draft.roles) {
+        const login = canonicalLogin(entry.login);
+        if (!login) continue;
+        if (Object.keys(roles).some((key) => sameLogin(key, login))) throw new Error(`${login} is listed more than once`);
+        if (!ROLE_NAMES.includes(entry.role)) throw new Error(`roles.${login} must be viewer, operator or admin`);
+        roles[login] = entry.role;
+      }
+    } catch (error) {
+      return toast(error.message, { error: true });
+    }
+    // A bootstrap login already stored stays admin; the form does not edit those rows.
+    for (const [login] of Object.entries(settings.roles ?? {})) {
+      if (!bootstrap.some((admin) => sameLogin(admin, login))) continue;
+      const canonical = canonicalLogin(login);
+      if (canonical) roles[canonical] = "admin";
+    }
+    await busy("roles", async () => {
+      try {
+        const { data } = await api("/v1/settings", { method: "PATCH", body: { roles } });
+        state.settings = { data };
+        state.editing = null;
+        toast(data.changed?.length ? `Saved: ${data.changed.join(", ")}` : "Nothing changed");
+      } catch (error) {
+        toast(error.message, { error: true });
+      }
+    });
+  };
+  return h("form", { class: "card form", onsubmit: submit, "aria-labelledby": "rl-title", "data-edit": "roles" },
+    h("h2", { class: "card-title", id: "rl-title" }, "Roles"),
+    bootstrap.length ? h("p", { class: "muted small" }, `Always admin: ${bootstrap.join(", ")}.`) : null,
+    h("fieldset", { class: "field" }, h("legend", {}, "Granted roles"),
+      draft.roles.map((entry, index) => h("div", { class: "row role-row", "data-login": entry.login },
+        h("input", {
+          type: "text", value: entry.login, "aria-label": "Email or service:<client-id>",
+          placeholder: "someone@example.com or service:client-id",
+          oninput: (event) => { entry.login = event.target.value; },
+        }),
+        h("select", { "aria-label": `Role for ${entry.login || "this login"}`, onchange: (event) => { entry.role = event.target.value; } },
+          ROLE_NAMES.map((role) => h("option", { value: role, selected: role === entry.role }, role))),
+        h("button", {
+          type: "button", class: "small-button", "aria-label": `Remove ${entry.login || "this row"}`,
+          onclick: () => { draft.roles.splice(index, 1); render(); },
+        }, "Remove"))),
+      h("button", { type: "button", class: "small-button", id: "roles-add", onclick: () => { draft.roles.push({ login: "", role: "viewer" }); render(); } }, "Add a login")),
+    h("p", { class: "muted small" }, "You cannot remove your own admin role, or leave nobody as admin. Bootstrap admins always stay admin."),
+    h("div", { class: "actions" },
+      h("button", { class: "primary", type: "submit", id: "roles-save", disabled: isBusy("roles") }, "Save"),
       h("button", { type: "button", onclick: () => { state.editing = null; render(); } }, "Cancel")));
 }
 
