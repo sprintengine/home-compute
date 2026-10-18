@@ -1,0 +1,49 @@
+{
+    "statusApi": 1,
+    "agentVersion": "0.3.0",
+    "protocol": 1,
+    "machineId": "m_01M57SQWBSWA5PY4YPZNG56MTD",
+    "name": "status-demo",
+    "server": "http://127.0.0.1:56870",
+    "dashboardUrl": "http://127.0.0.1:56869/",
+    "connection": "online",
+    "connected": true,
+    "drain": false,
+    "paused": false,
+    "pausedAt": null,
+    "draining": false,
+    "drainingSince": null,
+    "serverDrain": false,
+    "claiming": true,
+    "notClaimingBecause": [],
+    "revoked": false,
+    "upgradeRequired": false,
+    "lastSyncAt": "2026-10-18T15:29:25.320Z",
+    "nextSyncAt": "2026-10-18T15:29:55.320Z",
+    "lastError": null,
+    "clockSkewMs": -6,
+    "runtime": {
+        "kind": "fake",
+        "ok": true,
+        "lastError": null,
+        "health": {
+            "docker": "ok",
+            "lastError": null
+        },
+        "vm": null,
+        "lifecycle": null,
+        "awake": null
+    },
+    "current": [],
+    "runs": [],
+    "outbox": 0,
+    "upcoming": [],
+    "agent": {
+        "pid": 33656,
+        "startedAt": "2026-10-18T15:23:02.572Z",
+        "uptimeSeconds": 396,
+        "rssBytes": 55623680,
+        "logFile": "/tmp/hc-status-demo/agent.log",
+        "logHint": null
+    }
+}
