@@ -199,6 +199,13 @@ job file across and the agent API; and the agent in [agent/](agent/README.md),
 which so far runs only scripted (fake) containers. Nothing changes for the
 controller described above until the agent drives Docker and Colima (M3).
 
+Each worker shows itself locally: the agent serves a status API on 127.0.0.1
+only, behind a token only its user can read (see
+[agent/README.md](agent/README.md#local-status-api)), with `home-compute-agent
+status`, `history` and `watch` for a terminal. The Mac's menu bar app
+([macos/](macos/README.md)) has an agent mode over it, and
+[tray/](tray/README.md) is the same menu as a tray app for Windows and Linux.
+
 ## Licence
 
 Home Compute is licensed under Apache License 2.0. Bacalhau is not copied or
