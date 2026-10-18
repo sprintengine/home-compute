@@ -31,13 +31,13 @@
   // HcContainerLite / HC_CONTAINER_LITE / "lite", and add the class to a new migration tag.
   // `image` and vars.HC_CONTAINER_IMAGE must name the same registry.cloudflare.com digest:
   // cloud/scripts/set-container-image.sh writes both, then `npx wrangler deploy -c wrangler.core.jsonc`.
-  // max_instances is the hard cap; keep it equal to settings.cloudflare.maxConcurrent (default 1).
+  // max_instances is the hard cap; keep it equal to settings.cloudflare.maxConcurrent (2 here; the setting defaults to 1).
   "containers": [
     {
       "class_name": "HcContainerBasic",
-      "image": "./containers/placeholder.Dockerfile",
+      "image": "registry.cloudflare.com/29e356a26664bc14b4e5fd88cf533433/wingfoil-forecast@sha256:a191d79488ddc100b8ca8ba4d839181ff7fc547b4c7b040e58274e5dad90fcca",
       "instance_type": "basic",
-      "max_instances": 1
+      "max_instances": 2
     }
   ],
   "durable_objects": {
@@ -46,9 +46,9 @@
   "migrations": [{ "tag": "v1-cloudflare-containers", "new_sqlite_classes": ["HcContainerBasic"] }],
   "vars": {
     // Empty until a real image is deployed: until then a Cloudflare job's run fails with how to set it.
-    "HC_CONTAINER_IMAGE": "",
+    "HC_CONTAINER_IMAGE": "registry.cloudflare.com/29e356a26664bc14b4e5fd88cf533433/wingfoil-forecast@sha256:a191d79488ddc100b8ca8ba4d839181ff7fc547b4c7b040e58274e5dad90fcca",
     // The image the deployed one was copied from (its multi-platform ghcr digest): a job pinned to it runs here.
-    "HC_CONTAINER_SOURCE": ""
+    "HC_CONTAINER_SOURCE": "ghcr.io/sprintengine/wingfoil-forecast@sha256:38a1966c85b0a3841c2efee7249b3b19a87337fda92bf2adf7a233cf545908a7"
   }
   // Secrets (wrangler secret put NAME -c wrangler.core.jsonc), kept out of this file:
   //   VAULT_PRIVATE_KEY    the vault's RSA-OAEP private key (PKCS #8, base64); only hc-core can open secrets.
