@@ -110,8 +110,16 @@ const DISPATCH_AFTER = new Set([api.runJob, api.cancelRun, api.retryRun]);
 
 /** Asks hc-core to dispatch at once. Best effort: the cron does the same within a minute. */
 function nudgeContainers(env, ctx) {
-  if (!env.HC_CORE?.dispatch || !ctx?.waitUntil) return;
-  ctx.waitUntil(env.HC_CORE.dispatch().catch((error) => {
+  if (!env.HC_CORE || !ctx?.waitUntil) return;
+  // Never fails the request it follows: a binding that throws at once (hc-core not
+  // deployed, or not running beside a dev hc-web) is as harmless as one that rejects.
+  let work;
+  try {
+    work = Promise.resolve(env.HC_CORE.dispatch());
+  } catch (error) {
+    work = Promise.reject(error);
+  }
+  ctx.waitUntil(work.catch((error) => {
     console.warn(JSON.stringify({ event: "containers_nudge_failed", error: String(error?.message ?? error) }));
   }));
 }
