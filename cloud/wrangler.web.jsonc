@@ -21,9 +21,9 @@
     }
   ],
   "vars": {
-    // The Access team, as in https://<team>.cloudflareaccess.com, and the application's AUD tag.
-    "ACCESS_TEAM_DOMAIN": "",
-    "ACCESS_AUD": ""
+    // The Access team hostname (no scheme); the issuer is https://<this>. The application's AUD tag.
+    "ACCESS_TEAM_DOMAIN": "aged-forest-b17f.cloudflareaccess.com",
+    "ACCESS_AUD": "a3454d1c54793c8262765776cc0c0fc487427e912fe20319e890fe390831faaf"
   }
   // Secrets (wrangler secret put NAME -c wrangler.web.jsonc; locally .dev.vars), kept out of
   // this file because they are either secret or the owner's own:
