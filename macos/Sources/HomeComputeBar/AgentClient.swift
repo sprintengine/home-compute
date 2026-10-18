@@ -147,12 +147,22 @@ struct AgentClient: Sendable {
         return URLSession(configuration: config)
     }()
 
+    /// GET /v1/status; an agent before 0.3 answers only GET /status, which decodes the same way (less of it).
     @concurrent func status() async throws -> AgentStatus {
-        try JSONDecoder().decode(AgentStatus.self, from: try await send("v1/status"))
+        do {
+            return try JSONDecoder().decode(AgentStatus.self, from: try await send("v1/status"))
+        } catch AgentAPIError.http(404, _) {
+            return try JSONDecoder().decode(AgentStatus.self, from: try await send("status"))
+        }
     }
 
+    /// GET /v1/history; an agent before 0.3 keeps none.
     @concurrent func history(limit: Int = 20) async throws -> [AgentHistoryEntry] {
-        try JSONDecoder().decode(AgentHistory.self, from: try await send("v1/history", query: [URLQueryItem(name: "limit", value: String(limit))])).runs
+        do {
+            return try JSONDecoder().decode(AgentHistory.self, from: try await send("v1/history", query: [URLQueryItem(name: "limit", value: String(limit))])).runs
+        } catch AgentAPIError.http(404, _) {
+            return []
+        }
     }
 
     @concurrent func pause() async throws -> AgentStatus { try await post("v1/pause") }

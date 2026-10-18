@@ -163,6 +163,7 @@ struct AgentHeader: View {
         if let runtime = status.runtimeKind { parts.append(runtime == "colima" ? "Colima \(status.vmState ?? "")".trimmingCharacters(in: .whitespaces) : runtime) }
         parts.append(status.lastSyncAt.map { "synced \(Fmt.relative($0, now: now))" } ?? "not synced yet")
         if let version = status.agentVersion { parts.append("agent \(version)") }
+        if status.statusApi == nil { parts.append("update the agent to 0.3 for run history") }
         if status.outbox > 0 { parts.append("\(status.outbox) result\(status.outbox == 1 ? "" : "s") waiting to send") }
         return parts.joined(separator: " · ")
     }

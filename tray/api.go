@@ -36,6 +36,7 @@ type Status struct {
 	LastError          string     `json:"lastError"`
 	Outbox             int        `json:"outbox"`
 	Current            []Run      `json:"current"`
+	Runs               []Run      `json:"runs"` // agents before 0.3: {id, job, phase, since}
 	Runtime            struct {
 		Kind string `json:"kind"`
 		OK   bool   `json:"ok"`
@@ -65,7 +66,14 @@ func (s Status) IsPaused() bool {
 // Running is the runs in hand that have not finished.
 func (s Status) Running() []Run {
 	var runs []Run
-	for _, run := range s.Current {
+	current := s.Current
+	if current == nil {
+		current = s.Runs
+	}
+	for _, run := range current {
+		if run.ClaimedAt == nil {
+			run.ClaimedAt = run.Since
+		}
 		if !run.WaitingToReport && run.ID != "" {
 			runs = append(runs, run)
 		}
@@ -79,6 +87,7 @@ type Run struct {
 	Job              string     `json:"job"`
 	Phase            string     `json:"phase"`
 	ClaimedAt        *time.Time `json:"claimedAt"`
+	Since            *time.Time `json:"since"` // agents before 0.3
 	StartedAt        *time.Time `json:"startedAt"`
 	ElapsedMs        *float64   `json:"elapsedMs"`
 	CPUPct           *float64   `json:"cpuPct"`
@@ -183,6 +192,9 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 		if problem.Error == "" {
 			problem.Error = response.Status
 		}
+		if response.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("%w: %s", errNotFound, problem.Error)
+		}
 		return fmt.Errorf("the agent answered %d: %s", response.StatusCode, problem.Error)
 	}
 	if out == nil {
@@ -191,19 +203,29 @@ func (c *Client) do(ctx context.Context, method, path string, body any, out any)
 	return json.Unmarshal(data, out)
 }
 
-// Status is GET /v1/status.
+// errNotFound is a 404: an agent before 0.3, which has only GET /status.
+var errNotFound = errors.New("not found")
+
+// Status is GET /v1/status, or an older agent's GET /status.
 func (c *Client) Status(ctx context.Context) (Status, error) {
 	var status Status
 	err := c.do(ctx, http.MethodGet, "/v1/status", nil, &status)
+	if errors.Is(err, errNotFound) {
+		status = Status{}
+		err = c.do(ctx, http.MethodGet, "/status", nil, &status)
+	}
 	return status, err
 }
 
-// History is GET /v1/history?limit=N.
+// History is GET /v1/history?limit=N; an older agent keeps none.
 func (c *Client) History(ctx context.Context, limit int) ([]Entry, error) {
 	var answer struct {
 		Runs []Entry `json:"runs"`
 	}
 	err := c.do(ctx, http.MethodGet, fmt.Sprintf("/v1/history?limit=%d", limit), nil, &answer)
+	if errors.Is(err, errNotFound) {
+		return []Entry{}, nil
+	}
 	return answer.Runs, err
 }
 

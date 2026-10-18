@@ -33,7 +33,7 @@ struct AgentStatus: Decodable, Sendable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case statusApi, agentVersion, machineId, name, server, dashboardUrl, connection, connected, paused, drain, pausedAt, draining
-        case serverDrain, claiming, notClaimingBecause, lastSyncAt, nextSyncAt, lastError, runtime, current, outbox, agent
+        case serverDrain, claiming, notClaimingBecause, lastSyncAt, nextSyncAt, lastError, runtime, current, runs, outbox, agent
     }
     private enum RuntimeKeys: String, CodingKey { case kind, ok, lastError, vm }
     private enum VMKeys: String, CodingKey { case state }
@@ -67,7 +67,8 @@ struct AgentStatus: Decodable, Sendable, Equatable {
             runtimeError = runtime.string(.lastError)
             vmState = (try? runtime.nestedContainer(keyedBy: VMKeys.self, forKey: .vm))?.string(.state)
         }
-        current = (c.lenient(.current) as [AgentRun]?)?.filter { !$0.id.isEmpty } ?? []
+        // Agents before 0.3 list `runs` ({id, job, phase, since}) and have no `current`.
+        current = ((c.lenient(.current) as [AgentRun]?) ?? (c.lenient(.runs) as [AgentRun]?))?.filter { !$0.id.isEmpty } ?? []
         outbox = c.lenient(.outbox) ?? 0
         if let agent = try? c.nestedContainer(keyedBy: AgentKeys.self, forKey: .agent) {
             logFile = agent.string(.logFile)
@@ -118,6 +119,7 @@ struct AgentRun: Decodable, Sendable, Equatable, Identifiable {
 
     private enum CodingKeys: String, CodingKey {
         case id, job, attempt, image, phase, claimedAt, startedAt, elapsedMs, cpuPct, memoryBytes, peakMemoryBytes, memoryLimitBytes, waitingToReport
+        case since
     }
 
     init(id: String, job: String, phase: String = "running", claimedAt: Date? = nil) {
@@ -134,7 +136,8 @@ struct AgentRun: Decodable, Sendable, Equatable, Identifiable {
         attempt = c.lenient(.attempt)
         image = c.string(.image)
         phase = c.string(.phase) ?? "claimed"
-        claimedAt = c.date(.claimedAt)
+        // An agent before 0.3 says only when the phase began.
+        claimedAt = c.date(.claimedAt) ?? c.date(.since)
         startedAt = c.date(.startedAt)
         elapsedMs = c.double(.elapsedMs)
         cpuPct = c.double(.cpuPct)

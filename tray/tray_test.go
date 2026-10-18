@@ -283,6 +283,32 @@ func TestClient(t *testing.T) {
 	}
 }
 
+func TestAgentBeforeStatusAPI(t *testing.T) {
+	old := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/status" {
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"error":"not_found"}`))
+			return
+		}
+		w.Write([]byte(`{"name":"mac-mini","connection":"online","drain":false,"runs":[{"id":"r_1","job":"gfs","phase":"running","since":"2026-10-18T15:00:00Z","waitingToReport":false}]}`))
+	}))
+	t.Cleanup(old.Close)
+	port := old.Listener.Addr().(*net.TCPAddr).Port
+	client := NewClient(Endpoint{Port: port, Token: "t"})
+	status, err := client.Status(context.Background())
+	if err != nil || status.Name != "mac-mini" || len(status.Running()) != 1 || status.Running()[0].ClaimedAt == nil {
+		t.Fatalf("%+v %v", status, err)
+	}
+	runs, err := client.History(context.Background(), 5)
+	if err != nil || len(runs) != 0 {
+		t.Fatalf("%v %v", runs, err)
+	}
+	view := Build(&status, runs, nil, status.Running()[0].ClaimedAt.Add(time.Minute), "")
+	if view.Icon != IconRunning || view.Title != "gfs" || !strings.Contains(view.Hint, "0.3") {
+		t.Fatalf("%+v", view)
+	}
+}
+
 func TestIcons(t *testing.T) {
 	seen := map[string]bool{}
 	for _, kind := range []IconKind{IconIdle, IconRunning, IconPaused, IconOffline, IconDown} {

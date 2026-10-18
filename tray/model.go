@@ -278,6 +278,9 @@ func Build(status *Status, history []Entry, problem error, now time.Time, hint s
 		connection = "can't reach the control plane"
 	}
 	view.Header = fmt.Sprintf("%s: %s · %s", name, connection, sync)
+	if status.StatusAPI == 0 {
+		view.Hint = "Update the agent to 0.3 for run history and the controls"
+	}
 	view.Paused = status.IsPaused()
 	view.Draining = status.Draining
 

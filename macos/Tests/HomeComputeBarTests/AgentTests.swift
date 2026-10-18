@@ -38,7 +38,11 @@ struct AgentTests {
     @Test func oddAnswersDecodeLeniently() throws {
         // An agent before 0.3 has only `drain` for the pause switch, and no `current`.
         let old = try AgentFixtures.decode(AgentStatus.self, #"{"connection": "online", "drain": true, "runs": [], "outbox": "x"}"#)
-        #expect(old.paused && old.connected && old.current.isEmpty && old.outbox == 0)
+        #expect(old.paused && old.connected && old.current.isEmpty && old.outbox == 0 && old.statusApi == nil)
+        // Its runs, from `runs`, for the icon and Running now.
+        let busy = try AgentFixtures.decode(AgentStatus.self, #"{"connection": "online", "runs": [{"id": "r_1", "job": "gfs", "phase": "running", "since": "2026-10-18T15:00:00Z", "waitingToReport": false}]}"#)
+        #expect(busy.running.map(\.job) == ["gfs"])
+        #expect(busy.running.first?.since == ISODate.parse("2026-10-18T15:00:00Z"))
         let history = try AgentFixtures.decode(AgentHistory.self, #"{"runs": [{"run": "", "job": "x"}, {"run": "r_1", "outcome": "failed", "exitCode": "7"}]}"#)
         #expect(history.runs.count == 1, "a run without an id is dropped")
         #expect(history.runs[0].isFailed && history.runs[0].exitCode == nil)
