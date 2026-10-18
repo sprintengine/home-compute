@@ -276,7 +276,8 @@ report. Without one, a container prints one line and exits 0.
   Docker. The image is pulled over HTTPS (a private registry uses
   `spec.registryAuth` for that pull only; the password is not written down).
   Layers are gzip or uncompressed tar; a zstd layer is refused, with that
-  reason, rather than unpacked wrong.
+  reason, rather than unpacked wrong. A tag whose manifest is already
+  unpacked here downloads nothing past the manifest.
   Each run gets its own copy of the unpacked rootfs; the host's
   `resolv.conf` and `hosts` are copied into it, never through a symlink the
   image has. bubblewrap is the

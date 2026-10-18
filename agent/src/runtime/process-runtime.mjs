@@ -358,7 +358,14 @@ export class ProcessRuntime {
     const staging = path.join(this.cacheDir, "staging", `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
     const rootfs = path.join(staging, "rootfs");
     try {
-      const result = await pullImage(reference, { auth, rootfs, timeoutMs, fetch: this.fetch });
+      const result = await pullImage(reference, { auth, rootfs, timeoutMs, fetch: this.fetch, have: (digest) => this.#imageReady(digest) });
+      if (result.cached) {
+        // The tag still names what is unpacked here: nothing was downloaded.
+        await rm(staging, { recursive: true, force: true }).catch(() => {});
+        await this.#rememberRef(reference, result.digest);
+        await this.images.used(normalizeImageRef(reference).repo, result.digest, { pulled: true, now: this.clock.now() }).catch(() => {});
+        return { digest: result.digest, ms: Math.round(this.clock.monotonic() - started), cached: true };
+      }
       await writeJson(path.join(staging, "config.json"), result.config);
       await writeJson(path.join(staging, "meta.json"), { digest: result.digest, reference, pulledAt: this.clock.now() });
       const dest = this.#imageDir(result.digest);

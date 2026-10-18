@@ -12,6 +12,8 @@ import { gzipSync } from "node:zlib";
 import {
   authForRegistry, chooseManifest, extractTar, insideRoot, jobCommand, jobEnv, normalizeImageRef, packTar, parseWwwAuthenticate, pullImage,
 } from "../src/runtime/oci.mjs";
+import { ProcessRuntime } from "../src/runtime/process-runtime.mjs";
+import { tempState } from "./support.mjs";
 
 async function tempDir(t) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "hc-oci-"));
@@ -207,6 +209,25 @@ test("a private registry pull checks the digest, uses the bearer token, and does
   assert.ok(seen.some((entry) => entry.path.includes("/blobs/") && entry.auth === "Bearer issued-token"));
   const dumped = JSON.stringify(seen) + await readFile(path.join(root, "rootfs", "app.txt"), "utf8");
   assert.ok(!dumped.includes(password));
+  // A tag that still names an unpacked manifest downloads nothing past the manifest.
+  const before = seen.length;
+  const current = await pullImage("ghcr.io/acme/app:1", {
+    rootfs: path.join(root, "again"), timeoutMs: 10_000, fetch: fetchImpl,
+    auth: { server: "ghcr.io", username: "bot", password }, have: async (digest) => digest === manifestDigest,
+  });
+  assert.deepEqual(current, { digest: manifestDigest, cached: true });
+  assert.ok(!seen.slice(before).some((entry) => entry.path.includes("/blobs/")));
+  // The process runtime pulls a tag before every run (§4.5); the second pull of an unchanged tag unpacks nothing.
+  const state = await tempState(t);
+  const runtime = new ProcessRuntime({ state, fetch: fetchImpl, platform: "linux" });
+  const first = await runtime.pull("ghcr.io/acme/app:1", { auth: { server: "ghcr.io", username: "bot", password } });
+  const blobsAfterFirst = seen.filter((entry) => entry.path.includes("/blobs/")).length;
+  const second = await runtime.pull("ghcr.io/acme/app:1", { auth: { server: "ghcr.io", username: "bot", password } });
+  assert.equal(first.cached, undefined);
+  assert.equal(second.cached, true);
+  assert.equal(second.digest, first.digest);
+  assert.equal(seen.filter((entry) => entry.path.includes("/blobs/")).length, blobsAfterFirst);
+  assert.equal(await runtime.imageDigest("ghcr.io/acme/app:1"), manifestDigest);
   blobs[layerDigest] = gzipSync(packTar([{ name: "app.txt", data: "nope" }]));
   await assert.rejects(pullImage("ghcr.io/acme/app:1", {
     rootfs: path.join(root, "bad"), timeoutMs: 10_000, fetch: fetchImpl,

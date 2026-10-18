@@ -129,9 +129,12 @@ function registryUrl(spec, pathname) {
 /**
  * One registry pull. `fetch` is injectable. Resolves `{digest, config, rootfs}`
  * where `rootfs` is the directory the layers were unpacked into and `digest`
- * is the manifest the layers belong to (a tag's, or the pinned one).
+ * is the manifest the layers belong to (a tag's, or the pinned one). When
+ * `have(digest)` says that manifest is already unpacked, nothing past the
+ * manifest is fetched and the answer is `{digest, cached: true}`: a current
+ * tag costs one or two small requests, as `docker pull` does.
  */
-export async function pullImage(reference, { auth = null, rootfs, timeoutMs = 20 * 60_000, fetch: fetchImpl = globalThis.fetch, arch = process.arch } = {}) {
+export async function pullImage(reference, { auth = null, rootfs, timeoutMs = 20 * 60_000, fetch: fetchImpl = globalThis.fetch, arch = process.arch, have = null } = {}) {
   const spec = normalizeImageRef(reference);
   const signal = AbortSignal.timeout(timeoutMs);
   const client = new RegistryClient(spec, authForRegistry(auth, spec.registry), fetchImpl, signal);
@@ -140,8 +143,11 @@ export async function pullImage(reference, { auth = null, rootfs, timeoutMs = 20
   if (INDEX_TYPES.has(type) || Array.isArray(manifest.body.manifests)) {
     const chosen = chooseManifest(manifest.body, { arch });
     if (!chosen?.digest) throw new Error(`${reference} has no ${arch} Linux image`);
+    // The index names the platform manifest's digest; a registry that omits the header still has it.
     manifest = await client.manifest(chosen.digest);
+    manifest.digest = manifest.digest ?? chosen.digest;
   }
+  if (manifest.digest && have && await have(manifest.digest)) return { digest: manifest.digest, cached: true };
   const configDigest = manifest.body.config?.digest;
   if (!configDigest) throw new Error(`${reference} is not an image manifest`);
   const configBytes = await client.blob(configDigest);
