@@ -8,7 +8,7 @@
     "AWS_SECRET_ACCESS_KEY": "wingfoil-r2-secret"
   },
   "env": { "AWS_REGION": "auto", "FORCE5_SIDECARS": "0", "ECMWF_SOURCE": "ecmwf" },
-  "placement": { "requireLabels": { "pool": "wingfoil" }, "preferMachines": ["mac-mini"], "preferWaitSeconds": 300 },
+  "placement": { "requireLabels": { "runtime": "cloudflare-container" } },
   "policy": {
     "overlap": "coalesce",
     "catchUp": "latest",
