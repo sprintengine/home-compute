@@ -277,7 +277,9 @@ report. Without one, a container prints one line and exits 0.
   `spec.registryAuth` for that pull only; the password is not written down).
   Layers are gzip or uncompressed tar; a zstd layer is refused, with that
   reason, rather than unpacked wrong.
-  Each run gets its own copy of the unpacked rootfs. bubblewrap is the
+  Each run gets its own copy of the unpacked rootfs; the host's
+  `resolv.conf` and `hosts` are copied into it, never through a symlink the
+  image has. bubblewrap is the
   sandbox when it starts (`--unshare-user`, a pid namespace, the image as
   `/`), then bubblewrap without the pid namespace,
   then `unshare --user --map-root-user --root`, then proot, each probed with

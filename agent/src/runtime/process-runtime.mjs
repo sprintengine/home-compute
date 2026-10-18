@@ -16,7 +16,7 @@ import { systemClock } from "../clock.mjs";
 import { isLocalImage } from "../policy.mjs";
 import { freeDiskMiB } from "./docker-cli.mjs";
 import { ImageRecord, parseImageRef } from "./images.mjs";
-import { jobCommand, jobEnv, jobUser, jobWorkdir, normalizeImageRef, pullImage } from "./oci.mjs";
+import { insideRoot, jobCommand, jobEnv, jobUser, jobWorkdir, normalizeImageRef, pullImage } from "./oci.mjs";
 import { runCommand } from "./process.mjs";
 import {
   NETWORK_WARNING, SANDBOX_ENV, detectSandbox, hostCapacity, probeCgroup, readEnviron, readProcStat,
@@ -416,10 +416,11 @@ export class ProcessRuntime {
     await rm(runDir, { recursive: true, force: true });
     const rootfs = path.join(runDir, "rootfs");
     await copyTree(path.join(imageDir, "rootfs"), rootfs);
-    const relativeWork = workdir.startsWith("/") ? workdir.slice(1) : workdir;
-    await mkdir(path.join(rootfs, relativeWork), { recursive: true });
-    if (network !== "none") await this.#copyHostFile("/etc/resolv.conf", path.join(rootfs, "etc/resolv.conf"));
-    if (network !== "none") await this.#copyHostFile("/etc/hosts", path.join(rootfs, "etc/hosts"));
+    // Inside the copy only: a symlink in the image must not make the agent create or replace this machine's files.
+    const work = await insideRoot(rootfs, workdir);
+    if (work) await mkdir(work, { recursive: true });
+    if (network !== "none") await this.#copyHostFile("/etc/resolv.conf", rootfs, "etc/resolv.conf");
+    if (network !== "none") await this.#copyHostFile("/etc/hosts", rootfs, "etc/hosts");
     const identity = resolveIdentity(rootfs, jobUser(config));
     const { inherit, loader } = splitLoaderEnv(env);
     const launch = sandboxLaunch({
@@ -487,12 +488,16 @@ export class ProcessRuntime {
     }
   }
 
-  async #copyHostFile(source, dest) {
+  /** Copies a host file to `relative` in the run's rootfs. The file there (a symlink, say) is replaced, never written through. */
+  async #copyHostFile(source, rootfs, relative) {
     try {
       const data = await readFile(source);
-      await mkdir(path.dirname(dest), { recursive: true });
-      await rm(dest, { force: true }).catch(() => {});
-      await writeFile(dest, data);
+      const dir = await insideRoot(rootfs, path.posix.dirname(relative));
+      if (!dir) return;
+      await mkdir(dir, { recursive: true });
+      const dest = path.join(dir, path.posix.basename(relative));
+      await rm(dest, { force: true, recursive: true }).catch(() => {});
+      await writeFile(dest, data, { flag: "wx" });
     } catch {
       // DNS then uses whatever the image shipped. The run still starts.
     }

@@ -370,6 +370,31 @@ function safeRelative(name) {
   return parts;
 }
 
+/**
+ * The real path of `relative` under `root` when every part of it that exists
+ * stays inside `root`, or null. A part that does not exist yet ends the walk:
+ * whatever is made there is made inside. An image's absolute symlink (`etc ->
+ * /etc`) resolves on this machine, outside, so writing through it is refused.
+ */
+export async function insideRoot(root, relative) {
+  const rootReal = await realpath(root);
+  let current = rootReal;
+  for (const part of String(relative ?? "").split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") return null;
+    const next = path.join(current, part);
+    const info = await lstat(next).catch(() => null);
+    if (!info) {
+      current = next;
+      continue;
+    }
+    const real = await realpath(next).catch(() => null);
+    if (!real || (real !== rootReal && !real.startsWith(`${rootReal}${path.sep}`))) return null;
+    current = real;
+  }
+  return current;
+}
+
 /** Refuses a path whose real parent sits outside `rootReal` (a symlink planted by an earlier layer). */
 async function destination(root, rootReal, parts) {
   let current = root;
@@ -462,6 +487,10 @@ export async function extractTar(stream, root) {
     }
     const mode = Number(entryPax.mode ?? readNumeric(header, 100, 8)) & 0o7777;
     if (type === "5") {
+      // A directory replaces whatever else an earlier layer put there, as Docker does. A symlink left in
+      // place would have mkdir succeed through it and chmod change the directory it points at, outside the rootfs.
+      const existing = await lstat(target).catch(() => null);
+      if (existing && !existing.isDirectory()) await removeEntry(target);
       await mkdir(target, { recursive: true });
       await chmodQuiet(target, mode || 0o755);
       continue;

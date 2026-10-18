@@ -4,13 +4,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, stat } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, stat, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { gzipSync } from "node:zlib";
 import {
-  authForRegistry, chooseManifest, extractTar, jobCommand, jobEnv, normalizeImageRef, packTar, parseWwwAuthenticate, pullImage,
+  authForRegistry, chooseManifest, extractTar, insideRoot, jobCommand, jobEnv, normalizeImageRef, packTar, parseWwwAuthenticate, pullImage,
 } from "../src/runtime/oci.mjs";
 
 async function tempDir(t) {
@@ -105,6 +105,33 @@ test("a tar layer applies files, symlinks, long names and whiteouts, and cannot 
     { name: "escape/pwned.txt", data: "x" },
   ])), root), /escapes/);
   await assert.rejects(stat("/tmp/pwned.txt"));
+});
+
+test("a directory entry over a symlink replaces the symlink, and never changes the directory it points at", async (t) => {
+  const root = await tempDir(t);
+  const outside = await tempDir(t);
+  await chmod(outside, 0o700);
+  const { Readable } = await import("node:stream");
+  // One layer plants `a -> <outside>`; a later one declares `a/` as a world-writable directory.
+  await extractTar(Readable.from([packTar([{ name: "a", type: "2", link: outside }])]), root);
+  await extractTar(Readable.from([packTar([{ name: "a/", type: "5", mode: 0o777 }, { name: "a/file", data: "inside" }])]), root);
+  assert.equal((await stat(outside)).mode & 0o777, 0o700);
+  assert.ok((await lstat(path.join(root, "a"))).isDirectory());
+  assert.equal(await readFile(path.join(root, "a/file"), "utf8"), "inside");
+});
+
+test("insideRoot follows only what stays inside the root", async (t) => {
+  const root = await tempDir(t);
+  const outside = await tempDir(t);
+  await mkdir(path.join(root, "usr/lib"), { recursive: true });
+  await symlink("usr/lib", path.join(root, "lib"));
+  await symlink(outside, path.join(root, "etc"));
+  const real = await import("node:fs/promises").then(({ realpath }) => realpath(root));
+  assert.equal(await insideRoot(root, "/lib/x/y"), path.join(real, "usr/lib/x/y"));
+  assert.equal(await insideRoot(root, "/"), real);
+  assert.equal(await insideRoot(root, "/etc"), null);
+  assert.equal(await insideRoot(root, "etc/resolv.conf"), null);
+  assert.equal(await insideRoot(root, "../x"), null);
 });
 
 test("a digest that does not match is refused", () => {

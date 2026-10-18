@@ -299,6 +299,29 @@ test("a cgroup is removed with rmdir, which a recursive rm cannot do", async (t)
   assert.equal(existsSync(path.join(dir, "empty")), false);
 });
 
+test("an image's symlinks cannot make a run create or replace this machine's files", LINUX, async (t) => {
+  const { runtime } = await setup(t);
+  const outside = await mkdtemp(path.join(os.tmpdir(), "hc-outside-"));
+  t.after(() => rm(outside, { recursive: true, force: true }));
+  const root = await mkdtemp(path.join(os.tmpdir(), "hc-escape-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(path.join(root, "job.mjs"), `#!${process.execPath}\nconsole.log("ran")\n`, { mode: 0o755 });
+  // An image whose /etc and work directory are absolute symlinks: on this machine they point outside its root.
+  await symlink(outside, path.join(root, "etc"));
+  await symlink(outside, path.join(root, "work"));
+  await runtime.installImage({
+    reference: REF, digest: DIGEST, rootfs: root,
+    config: { config: { Entrypoint: ["/job.mjs"], Env: ["PATH=/usr/bin:/bin"], WorkingDir: "/work/sub" } },
+  });
+  const handle = await runtime.run(spec({ network: "bridge" }));
+  assert.deepEqual(await linesOf(handle), ["ran"]);
+  await handle.wait();
+  await handle.remove();
+  assert.equal(existsSync(path.join(outside, "resolv.conf")), false);
+  assert.equal(existsSync(path.join(outside, "hosts")), false);
+  assert.equal(existsSync(path.join(outside, "sub")), false);
+});
+
 function capture() {
   const lines = [];
   const errors = [];
