@@ -96,7 +96,13 @@ export async function startDevStack() {
     DEV_ACCESS_EMAIL: DEV_USER,
     CORE_URL: core,
   };
-  const webProcess = startWrangler(["dev", "-c", "wrangler.web.jsonc", "--persist-to", state, "--port", String(webPort), "--ip", "127.0.0.1",
+  // hc-web without its hc-core binding: a Run now would otherwise have hc-core dispatch at once,
+  // and the two workerd processes writing the shared local D1 together can fail with SQLITE_BUSY.
+  // (Deployed D1 is one service; the cron dispatches here within the test's own minute.)
+  const webConfig = path.join(CLOUD, `wrangler.web.test-${process.pid}-${webPort}.jsonc`);
+  await writeFile(webConfig, (await readFile(path.join(CLOUD, "wrangler.web.jsonc"), "utf8"))
+    .replace(/("services":\s*)\[[^\]]*\]/, "$1[]"));
+  const webProcess = startWrangler(["dev", "-c", webConfig, "--persist-to", state, "--port", String(webPort), "--ip", "127.0.0.1",
     "--inspector-port", String(webInspector), "--log-level", "warn", ...Object.entries(vars).flatMap(([name, value]) => ["--var", `${name}:${value}`])], quiet);
   let coreProcess = null;
   // hc-core's config names the deployed registry.cloudflare.com image, and wrangler dev signs in to
@@ -110,6 +116,7 @@ export async function startDevStack() {
     await new Promise((resolve) => certs.close(resolve));
     await rm(state, { recursive: true, force: true });
     await rm(coreConfig, { force: true });
+    await rm(webConfig, { force: true });
   };
   try {
     await waitFor(`${web}/v1/health`, webProcess.output);
