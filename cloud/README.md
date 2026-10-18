@@ -199,8 +199,9 @@ cut-over) is [docs/deploy.md](../docs/deploy.md). In short: migrations
 first (`npx wrangler d1 migrations apply home-compute --remote -c
 wrangler.web.jsonc`), then `npx wrangler deploy -c wrangler.core.jsonc` and
 `-c wrangler.web.jsonc`. Owner-specific values (the bootstrap admin, hc-core's
-URL, the vault keys, the alert addresses) are Worker secrets, never in these
-files. Until Access is set up, `scripts/local-admin.sh` runs hc-web locally
+URL, the vault keys, the alert addresses, and hc-web's Access team and
+audience) are Worker secrets, never in these files. Until Access is set up,
+`scripts/local-admin.sh` runs hc-web locally
 against the deployed database as an admin.
 
 ## Notes on the implementation
