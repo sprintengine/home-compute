@@ -75,7 +75,7 @@ async function tokenFor(identity) {
  * none). Mutations get what a same-origin dashboard fetch sends (JSON, Origin,
  * Sec-Fetch-Site and the CSRF token) unless `browser: false` or overridden.
  */
-export async function call(path, { method = "GET", body, identity = OWNER, headers = {}, browser = true, now } = {}) {
+export async function call(path, { method = "GET", body, identity = OWNER, headers = {}, browser = true, now, environment = env, ctx } = {}) {
   const all = { ...headers };
   if (identity) all["cf-access-jwt-assertion"] ??= await tokenFor(identity);
   const mutating = !["GET", "HEAD"].includes(method);
@@ -98,7 +98,7 @@ export async function call(path, { method = "GET", body, identity = OWNER, heade
     body: body === undefined ? (mutating ? "{}" : undefined) : typeof body === "string" ? body : JSON.stringify(body),
   });
   const started = performance.now();
-  const response = await handle(request, env, now === undefined ? {} : { now });
+  const response = await handle(request, environment, { ...(now === undefined ? {} : { now }), ...(ctx ? { ctx } : {}) });
   const elapsed = performance.now() - started;
   const text = await response.text();
   let parsed = null;

@@ -2,6 +2,7 @@
 // in one D1 batch. Handlers stay small: a request is a few indexed reads and
 // at most one batch of writes, well inside the 10 ms CPU budget.
 
+import { normaliseGuard } from "../../src/core/cloudflare.mjs";
 import { classifyLines, tailLines } from "../../src/core/logs.mjs";
 import { newId } from "../../src/core/ids.mjs";
 import { jobDifferences, normaliseJob } from "../../src/core/job.mjs";
@@ -170,10 +171,14 @@ const DEFINITION_PARTS = {
     keys: ["requireLabels", "preferMachines", "preferWaitSeconds"],
     apply: (current, body) => ({ placement: withoutNulls({ ...current.placement, ...body }) }),
   },
-  // `{cpus?, memoryMiB?, diskMiB?}`.
+  // `{cpus?, memoryMiB?, diskMiB?, instanceType?}`. `instanceType: null` clears it (Cloudflare then uses basic).
   resources: {
-    keys: ["cpus", "memoryMiB", "diskMiB"],
-    apply: (current, body) => ({ resources: { ...current.resources, ...withoutNulls(body) } }),
+    keys: ["cpus", "memoryMiB", "diskMiB", "instanceType"],
+    apply: (current, body) => {
+      const resources = { ...current.resources, ...withoutNulls(body) };
+      if (body.instanceType === null) delete resources.instanceType;
+      return { resources };
+    },
   },
   // `{image?, registryAuth?}`: a tag or, preferably, `repo@sha256:…` (the "promote tag → digest" button sends that),
   // and the vault secret that pulls it from a private registry (`"vault:<name>"`, null for none).
@@ -417,6 +422,7 @@ export async function audit({ db, url }) {
 
 const SETTING_KEYS = {
   globalPause: "global_pause", retention: "retention", roles: "roles", desiredAgentVersion: "desired_agent_version",
+  cloudflare: "cloudflare",
 };
 const VERSION = /^\d{1,4}\.\d{1,4}\.\d{1,4}$/;
 
@@ -433,6 +439,16 @@ function checkSettings(body) {
   }
   if (body.desiredAgentVersion !== undefined && body.desiredAgentVersion !== null && !VERSION.test(String(body.desiredAgentVersion))) {
     throw new HttpError(400, "desiredAgentVersion must be a version like 0.2.0, or null");
+  }
+  if (body.cloudflare !== undefined) {
+    if (!body.cloudflare || typeof body.cloudflare !== "object" || Array.isArray(body.cloudflare)) throw new HttpError(400, "cloudflare must be an object");
+    const unknownGuard = Object.keys(body.cloudflare).filter((key) => !["maxConcurrent", "maxRunSeconds"].includes(key));
+    if (unknownGuard.length) throw new HttpError(400, `Unknown cloudflare setting ${unknownGuard.join(", ")}`);
+    try {
+      normaliseGuard(body.cloudflare);
+    } catch (error) {
+      throw new HttpError(400, error.message);
+    }
   }
   if (body.roles !== undefined) {
     if (!body.roles || typeof body.roles !== "object" || Array.isArray(body.roles)) throw new HttpError(400, "roles must be an object");
@@ -451,6 +467,7 @@ async function currentSettings(db) {
     roles: stored.roles ?? {},
     // Machines on an older agent show "needs update" (until M7's signed updates, a person updates them).
     desiredAgentVersion: stored.desired_agent_version ?? null,
+    cloudflare: normaliseGuard(stored.cloudflare ?? {}),
   };
 }
 
@@ -462,7 +479,9 @@ export async function getSettings({ db }) {
 export async function patchSettings({ db, identity, ip, now }, body) {
   checkSettings(body);
   const before = await currentSettings(db);
-  const proposed = Object.fromEntries(Object.keys(body).map((key) => [key, key === "retention" ? { ...before.retention, ...body.retention } : body[key]]));
+  const proposed = Object.fromEntries(Object.keys(body).map((key) => [key, key === "retention"
+    ? { ...before.retention, ...body.retention }
+    : key === "cloudflare" ? normaliseGuard({ ...before.cloudflare, ...body.cloudflare }) : body[key]]));
   const changed = Object.keys(proposed).filter((key) => JSON.stringify(proposed[key]) !== JSON.stringify(before[key]));
   if (changed.length) {
     await db.batch([

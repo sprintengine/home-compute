@@ -7,7 +7,7 @@
   "scripts": {
     "test": "vitest run && node --test --test-force-exit --test-timeout=300000 'test-node/*.test.mjs'",
     "dev:web": "wrangler dev -c wrangler.web.jsonc --persist-to .wrangler/state",
-    "dev:core": "wrangler dev -c wrangler.core.jsonc --persist-to .wrangler/state --test-scheduled --port 8788 --inspector-port 9230",
+    "dev:core": "wrangler dev -c wrangler.core.jsonc --persist-to .wrangler/state --test-scheduled --port 8788 --inspector-port 9230 --enable-containers=false",
     "migrate:local": "wrangler d1 migrations apply home-compute --local -c wrangler.web.jsonc --persist-to .wrangler/state",
     "build": "wrangler deploy --dry-run -c wrangler.web.jsonc --outdir dist/web && wrangler deploy --dry-run -c wrangler.core.jsonc --outdir dist/core",
     "screenshots": "node scripts/dashboard-screenshots.mjs"
@@ -20,5 +20,8 @@
     "vitest": "^5.0.3",
     "wrangler": "^4.149.0"
   },
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@cloudflare/containers": "^0.3.7"
+  }
 }

@@ -199,6 +199,12 @@ job file across and the agent API; and the agent in [agent/](agent/README.md),
 which so far runs only scripted (fake) containers. Nothing changes for the
 controller described above until the agent drives Docker and Colima (M3).
 
+A job can also target a Cloudflare Container instead of a machine
+(`placement.requireLabels.runtime = cloudflare-container`). That path, its
+cost and the steps to turn it on for one job are in
+[docs/cloudflare-containers.md](docs/cloudflare-containers.md). It is not
+enabled by a deploy on its own.
+
 ## Licence
 
 Home Compute is licensed under Apache License 2.0. Bacalhau is not copied or

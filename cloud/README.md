@@ -8,7 +8,7 @@ talks to `hc-core` is in [../agent](../agent/README.md).
 | Worker | Config | What it does |
 | --- | --- | --- |
 | `hc-web` | `wrangler.web.jsonc` | The dashboard (static assets from `../dashboard`) and the `/v1` human API, behind Cloudflare Access. |
-| `hc-core` | `wrangler.core.jsonc` | The agent API (`/agent/v1/*`: enrol, sync, complete), and the `* * * * *` cron: creates due runs, marks expired leases `lost` and retries them by policy, times out unfinished runs, applies retention hourly. |
+| `hc-core` | `wrangler.core.jsonc` | The agent API (`/agent/v1/*`: enrol, sync, complete), and the `* * * * *` cron: creates due runs, marks expired leases `lost` and retries them by policy, times out unfinished runs, applies retention hourly, then starts any job that targets the Cloudflare Containers executor ([docs/cloudflare-containers.md](../docs/cloudflare-containers.md)). |
 
 Both import the pure modules in `../src/core`, which the local controller and
 the agent share. Nothing here is deployed yet: the steps at the end are for
@@ -156,7 +156,8 @@ dashboard's `X-CSRF-Token`) from `GET /v1/session`.
 | `GET /v1/runs/:id`, `/v1/runs/:id/logs` | viewer | The log is the agent's redacted tail: up to 200 lines while running, 500 at the end. |
 | `POST /v1/runs/:id/cancel` | operator | A waiting or active run; its agent stops it on its next sync. |
 | `POST /v1/runs/:id/retry` | operator | A finished or lost run again: `attempt + 1`, `retry_of`. `{force?}` as Run now. |
-| `GET /v1/machines?all=1`, `/v1/machines/:id` | viewer | Status (online, offline, draining, unhealthy, revoked), VM (with `vmSince` and the last day's `vmHistory` spans), free capacity, caps, labels, agent (`updateAvailable` when older than the desired version), clock skew, current runs. `all` adds revoked ones. |
+| `GET /v1/containers` | viewer | Container-seconds and the list-price upper bound for the Cloudflare executor over 30 days, including runs still going. Empty until a job targets it. |
+| `GET /v1/machines?all=1`, `/v1/machines/:id` | viewer | Status (online, offline, draining, unhealthy, revoked), VM (with `vmSince` and the last day's `vmHistory` spans), free capacity, caps, labels, agent (`updateAvailable` when older than the desired version), clock skew, current runs. `all` adds revoked ones. The `cloudflare` machine is the Containers executor: no VM, drain only. |
 | `GET /v1/machines/:id/runs?since=` | viewer | What it ran from `since` (default 24 hours ago), newest first. |
 | `PATCH /v1/machines/:id` | operator / admin | `{drain}` for an operator; `{name, labels, capacity, capabilities, rotateCredential: true}` need an admin. |
 | `DELETE /v1/machines/:id` | admin | Revokes it: its next request gets 401. |
@@ -284,6 +285,7 @@ against the deployed database as an admin.
   writes nothing and is settled again as what it became. A late, recovered
   result never replaces a newer finished run as the job's last (nor its
   `published`), and cancels its own retry if that has not started yet.
+- **Cloudflare Containers.** After the same lease, retry and timeout steps, the cron checks the container runs going and starts runs whose placement requires `runtime=cloudflare-container` (hc-web's Run now, Cancel and Retry do the same at once, through hc-core's `Dispatcher` entrypoint). No such job means one read and no machine row. Each run is a Durable Object that outlives the cron, renews the lease only while its container answers, keeps the live log tail, and settles through the same `complete()` path with the job's output and reports. Agents never claim these runs. See [docs/cloudflare-containers.md](../docs/cloudflare-containers.md).
 - **Lost runs.** The cron marks expired leases `lost` and retries per §3.4:
   at once if the run never started, after `lostGraceSeconds` if it was
   running and the job says `onLostRunning`, at most `maxAttempts` attempts,

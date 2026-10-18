@@ -5,7 +5,7 @@
 // installing over SSH is M6.
 
 import {
-  MACHINE_STATUS, capsText, duration, installCommands, labelsText, mib, parseLabels, parseTime, phaseOf, relative, runHref, vmText,
+  MACHINE_STATUS, capsText, duration, installCommands, isCloudflareExecutor, labelsText, mib, parseLabels, parseTime, phaseOf, relative, runHref, vmText,
   vmUptime,
 } from "./lib.js";
 import {
@@ -49,7 +49,11 @@ function machineCard(machine, now) {
       ["Running", current.length ? current.map((run, index) => [index ? ", " : "", h("a", { href: runHref(run.id) }, `${run.job} (${run.phase})`)]) : "nothing"],
       ["Caps", capsText(machine.capacity)],
       ["Labels", labelsText(machine.labels) || "none"],
-      ["Agent", [machine.agentVersion ?? "unknown", machine.updateAvailable ? h("span", { class: "chip warning small-chip" }, `update to ${machine.desiredAgentVersion}`) : null]],
+      ["Agent", isCloudflareExecutor(machine) ? "Cloudflare Containers (no agent)" : [machine.agentVersion ?? "unknown", machine.updateAvailable ? h("span", { class: "chip warning small-chip" }, `update to ${machine.desiredAgentVersion}`) : null]],
+      ...(isCloudflareExecutor(machine) ? [
+        ["Image", machine.facts?.image || "none deployed (cloud/scripts/set-container-image.sh)"],
+        ["Sizes", (machine.facts?.instanceTypes ?? []).join(", ") || "none deployed"],
+      ] : []),
       ["Last seen", machine.lastSeenAt ? relative(machine.lastSeenAt, now) : "never"],
       ["Clock", skewText(machine)],
     ]),
@@ -100,23 +104,27 @@ export function machinePage(id) {
     machine.localDrain ? banner("Drained on the machine itself (its menu bar or status server).", "info") : null,
     can("operator") ? h("div", { class: "actions" },
       drainButton(machine),
-      can("admin") && !draft ? h("button", { id: "machine-edit", onclick: () => {
+      can("admin") && !draft && !isCloudflareExecutor(machine) ? h("button", { id: "machine-edit", onclick: () => {
         state.editing = { kind: "machine", id: machine.id, name: machine.name, labels: labelsText(machine.labels), ...capsDraft(machine.capacity) };
         render();
       } }, "Edit") : null,
-      can("admin") ? h("button", { class: "danger", id: "machine-revoke", disabled: isBusy(`${machine.id}:revoke`), onclick: () => revoke(machine) }, "Revoke") : null) : null,
+      can("admin") && !isCloudflareExecutor(machine) ? h("button", { class: "danger", id: "machine-revoke", disabled: isBusy(`${machine.id}:revoke`), onclick: () => revoke(machine) }, "Revoke") : null) : null,
     draft ? editForm(machine, draft) : null,
     h("div", { class: "cards" },
       h("section", { class: "card", "aria-labelledby": "mf-title" }, h("h2", { class: "card-title", id: "mf-title" }, "Machine"),
         facts([
           ["VM", vmText(machine, now)],
+          ...(isCloudflareExecutor(machine) ? [
+            ["Container-seconds (30d)", typeof machine.facts?.containerSeconds30d === "number" ? String(machine.facts.containerSeconds30d) : "none yet"],
+            ["Estimated (30d)", typeof machine.facts?.estimatedUsd30d === "number" ? `~$${machine.facts.estimatedUsd30d} before allotment` : null],
+          ] : []),
           ["Boot time", typeof machine.health?.vmBootSeconds === "number" ? duration(machine.health.vmBootSeconds) : null],
           ["VM up (24 h)", machine.vm?.state ? `${duration(uptime.ms / 1000)} (${Math.round(uptime.fraction * 100)}%)` : null],
           ["Free now", machine.free ? capsText({ cpus: machine.free.cpus, memoryMiB: machine.free.memoryMiB, maxRuns: machine.free.runs }) : null],
           ["Caps", capsText(machine.capacity)],
           ["Labels", labelsText(machine.labels) || "none"],
           ["Capabilities", machine.capabilities?.length ? machine.capabilities.join(", ") : null],
-          ["Agent", [machine.agentVersion ?? "unknown", machine.updateAvailable ? ` (update to ${machine.desiredAgentVersion})` : ""]],
+          ["Agent", isCloudflareExecutor(machine) ? "Cloudflare Containers (no agent)" : [machine.agentVersion ?? "unknown", machine.updateAvailable ? ` (update to ${machine.desiredAgentVersion})` : ""]],
           ["Runtime", [machine.facts?.runtime, machine.facts?.dockerVersion ?? machine.facts?.version].filter(Boolean).join(" ") || null],
           ["OS", [machine.facts?.os, machine.facts?.arch].filter(Boolean).join(" ") || null],
           ["Last seen", machine.lastSeenAt ? `${relative(machine.lastSeenAt, now)} · ${fullTime.format(new Date(machine.lastSeenAt))}` : "never"],
