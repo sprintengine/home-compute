@@ -7,14 +7,15 @@ HTTPS, claims the runs it is given, runs them in containers, and sends back
 what happened: the exit code, OOM and timeout flags, stats, json-lines
 reports and a redacted log tail. It schedules nothing itself.
 
-Three container runtimes implement the `ContainerRuntime` interface of
+Four runtimes implement the `ContainerRuntime` interface of
 [src/runtime/runtime.mjs](src/runtime/runtime.mjs):
 
 | Runtime | For | What it does |
 | --- | --- | --- |
 | `docker` | Docker Engine on Linux or WSL, Docker Desktop | The `docker` CLI pulls, runs, stops and removes; the Engine API over the same unix socket answers inspect, wait, stats, ping and info. |
 | `colima` | macOS | The same, inside a Colima VM of the agent's own profile (`home-compute`), which it starts when work is due, sizes for it and stops when idle (§4.4). |
-| `fake` | tests, trying the agent without Docker | Containers that follow a script instead of running an image. |
+| `process` | Linux with no Docker daemon | Pulls the OCI image with the registry HTTP API, unpacks it, and runs its entrypoint as a process. bubblewrap, a user namespace or proot gives it the image as `/`; with none of them the machine claims nothing (`doctor` says why). |
+| `fake` | tests, trying the agent without a runtime | Containers that follow a script instead of running an image. |
 
 It is Node 22, ESM, with no runtime dependencies. `npm run build:agent` (from
 the repository root) bundles `agent/src` and the `src/core` modules it shares
@@ -116,6 +117,61 @@ it to your own registry.
    sudo systemctl daemon-reload && sudo systemctl enable --now home-compute-agent
    ```
 
+### Linux without Docker
+
+A machine that is itself a container, with tini and no systemd and no
+Docker daemon, uses `--runtime process`. Images stay the way a job is
+shipped. The agent pulls the OCI image itself and runs it as a process.
+Install bubblewrap (`apt-get install bubblewrap` or `dnf install
+bubblewrap`) so jobs get a user namespace, a pid namespace and the image's
+root filesystem. In a container that masks `/proc`, bubblewrap runs without
+the pid namespace, and `doctor` warns that a job then sees the machine's
+processes. bubblewrap needs unprivileged user namespaces; a container that
+refuses them (Docker's default seccomp and AppArmor profiles do) has no
+sandbox, and then **the machine claims nothing** and `doctor` fails: an
+image's programs need the image's own libraries and paths at `/`, so
+running them on the machine itself fails or, worse, uses the machine's
+files. `process.sandbox: "plain"` allows that for images built to run that
+way. `ca-certificates` is what the registry HTTPS client trusts. The
+state directory is `/var/lib/home-compute` (there is no `docker` group).
+Enrolment records the label `runtime=process`. A job that sets
+`placement.requireLabels.runtime` to `docker` is not sent here; a job with
+no runtime requirement can run.
+
+1. Install:
+
+   ```sh
+   # Needs bubblewrap, ca-certificates, git, sudo and Node 22+ for every user (not through nvm). No Docker daemon and no systemd.
+   git clone https://github.com/sprintengine/home-compute.git ~/home-compute
+   cd ~/home-compute && npm ci && npm run build:agent
+   sudo install -d /opt/home-compute/agent/current /opt/home-compute/node/bin
+   sudo install -m 0644 agent/dist/home-compute-agent.mjs /opt/home-compute/agent/current/
+   sudo install -m 0755 agent/service/home-compute-agent-foreground.sh /opt/home-compute/agent/current/
+   sudo ln -sf "$(command -v node)" /opt/home-compute/node/bin/node
+   sudo useradd --system --home-dir /var/lib/home-compute --shell /usr/sbin/nologin hcagent
+   sudo install -d -m 0700 -o hcagent -g hcagent /var/lib/home-compute
+   ```
+
+2. Enrol: paste this line on its own, then the token when asked:
+
+   ```sh
+   printf 'Join token: '; read -rs HC_JOIN_TOKEN; echo; printf '%s' "$HC_JOIN_TOKEN" | sudo -u hcagent /opt/home-compute/node/bin/node /opt/home-compute/agent/current/home-compute-agent.mjs enrol --state-dir /var/lib/home-compute --server https://hc-core.<account>.workers.dev --join-token-stdin --runtime process --allow-images 'ghcr.io/sprintengine/*'; unset HC_JOIN_TOKEN
+   ```
+
+3. Check, then run in the foreground:
+
+   ```sh
+   sudo -u hcagent /opt/home-compute/node/bin/node /opt/home-compute/agent/current/home-compute-agent.mjs doctor --state-dir /var/lib/home-compute
+   # Foreground, for tini or a shell: exit 0 stops; any other exit restarts after 5s.
+   sudo -u hcagent /opt/home-compute/agent/current/home-compute-agent-foreground.sh
+   ```
+
+`home-compute-agent run` is the agent: one foreground process, and SIGTERM
+or SIGINT makes it exit 0. The foreground script is the supervisor for a
+host whose init will not restart it. Point tini at that script (or set it
+as the container command). A clean exit stops the loop; any other exit
+waits 5 seconds and starts the agent again.
+
 The machine appears on the dashboard after its first sync (within 30
 seconds). The dashboard's commands come from `installCommands()` in
 `dashboard/lib.js`; `test/dashboard-lib.test.mjs` keeps them honest.
@@ -124,10 +180,10 @@ seconds). The dashboard's commands come from `installCommands()` in
 
 | Command | What it does |
 | --- | --- |
-| `enrol --server URL --join-token-stdin [--name NAME] [--runtime docker\|colima\|fake] [--allow-images 'a/*,b/*'] [--allow-local-images] [--colima-profile NAME] [--reenrol]` | Spends a join token (read from stdin, so it never shows in `ps`; `--join-token TOKEN` works but warns) for this machine's id and credential, and writes the configuration and credential. The name, labels and capabilities come from the token; `--name` (default: the host name) is used only if the token names none. Refuses to replace an existing credential without `--reenrol`. Says so when no image may run yet. |
+| `enrol --server URL --join-token-stdin [--name NAME] [--runtime docker\|colima\|process\|fake] [--allow-images 'a/*,b/*'] [--allow-local-images] [--colima-profile NAME] [--reenrol]` | Spends a join token (read from stdin, so it never shows in `ps`; `--join-token TOKEN` works but warns) for this machine's id and credential, and writes the configuration and credential. The name, labels and capabilities come from the token; `--name` (default: the host name) is used only if the token names none. Refuses to replace an existing credential without `--reenrol`. Says so when no image may run yet. The facts include `runtime`, which hc-core stores as the machine label the scheduler matches. |
 | `run` | The service: adopts containers left from before a restart, sends what waits in the outbox, then syncs at the interval `hc-core` sets; with Colima it also runs the VM lifecycle. SIGTERM or SIGINT stops it at once; running containers (and the VM) are left alone and adopted next time. |
 | `status [--json]` | Asks the running agent's local status server: connection, last and next sync, clock skew, drain, runtime, the VM (state, size, measured boot, what the lifecycle waits for), runs, outbox, upcoming slots. |
-| `doctor [--start-vm]` | Checks the configuration, `allowImages` (it fails while the list is empty), file permissions, credential, the runtime and the control plane. Docker: it answers, and `docker run --rm hello-world` works under a run's restrictions. Colima: the profile's state; a stopped VM is left stopped unless `--start-vm` (and the service is not running), which starts it, checks Docker, records its boot time and stops it again. If the service is not running, makes one sync without claiming to prove the credential and measure clock skew. Exits 1 if anything failed. |
+| `doctor [--start-vm]` | Checks the configuration, `allowImages` (it fails while the list is empty), file permissions, credential, the runtime and the control plane. Docker: it answers, and `docker run --rm hello-world` works under a run's restrictions. Colima: the profile's state; a stopped VM is left stopped unless `--start-vm` (and the service is not running), which starts it, checks Docker, records its boot time and stops it again. Process: the sandbox that will be used, whether memory can be a cgroup, and a tiny image run (`docker.io/library/busybox` unless `process.selfTestImage` says otherwise). Warnings (plain sandbox, no cgroup, shared network) are printed and the command still succeeds when the tiny run does. If the service is not running, makes one sync without claiming to prove the credential and measure clock skew. Exits 1 if anything failed. |
 | `version` | The agent version and protocol. |
 
 Every command takes `--state-dir DIR` (or `HC_AGENT_STATE_DIR`).
@@ -165,7 +221,7 @@ temporary file, then a rename); `doctor` checks this.
 | --- | --- | --- |
 | `server` | | `hc-core`'s URL. |
 | `machineId`, `name` | | From enrolment. |
-| `runtime` | `"fake"` | `docker`, `colima` or `fake`. |
+| `runtime` | `"fake"` | `docker`, `colima`, `process` or `fake`. |
 | `caps` | `{}` | `{cpus, memoryMiB, diskMiB, maxRuns}` this machine offers. Unset figures come from the runtime; `maxRuns` defaults to 2. For Colima this is the largest VM, not its current size (default: half the Mac's CPUs and memory, at most 8 GiB); the dashboard can cap it further. |
 | `allowImages` | `[]` | Image patterns this machine runs (`*` matches anything), whatever the control plane says. **Empty runs nothing**: list what you trust, e.g. `["ghcr.io/sprintengine/*"]`. `doctor` fails while it is empty and warns while it is `["*"]`. |
 | `allowLocalImages` | `false` | Whether images without a registry host (`wingfoil-forecast:local`, `alpine`) may run. |
@@ -176,6 +232,7 @@ temporary file, then a rename); `doctor` checks this.
 | `pullTimeoutSeconds` | `1200` | A pull taking longer fails the run (§3.6). |
 | `docker` | `{}` | `binary` (default `docker`, found on PATH); `host`, a `unix://` socket (default `DOCKER_HOST`, else the current docker context, else `/var/run/docker.sock`); `cgroupParent`, e.g. `"home-compute.slice"` on Linux (see Services). |
 | `colima` | `{}` | `profile` (default `home-compute`; never `default`), `binary`, `home` (COLIMA_HOME), `vmType` (`vz`), `diskGiB` (60; a disk only grows), `minCpus` (2), `minMemoryMiB` (2048), `startTimeoutSeconds` (600), `mountHome` (false: the VM sees none of your files), and `idleStopSeconds`/`keepWarmSeconds`, which override the control plane's `config` when set (0 idle: never stop). |
+| `process` | `{}` | `sandbox`: `auto` (default), `bwrap`, `userns`, `proot` or `plain`. `auto` uses the first of bubblewrap, bubblewrap without a pid namespace, util-linux `unshare` and proot that starts with a run's flags; when none does, `doctor` fails and the machine claims nothing. `plain` (the entrypoint run on this machine, with its loader, root and paths) is only used when named, and suits only self-contained images. Naming a sandbox that cannot start makes `doctor` and the run fail. `cacheDir` (default `<state>/cache`) holds unpacked images and per-run rootfs copies. `keepImages` (3) is how many digests of one repository to keep. `bwrap`, `proot` and `unshare` name those binaries. `selfTestImage` and `selfTestArgs` are what `doctor` runs. |
 | `caffeinate` | `"auto"` | Hold `caffeinate -i -w <agent pid>` while a run is active or due on this machine soon: `"auto"` on a Mac with a real runtime, `true`, or `false`. |
 | `awakeAheadSeconds` | `900` | How long before a slot this machine is preferred for (or the only one for) the Mac is held awake. |
 | `fake` | `{}` | FakeRuntime's options: `script` (or `scripts` by job id or image), `vm` (`"stopped"` for a Colima-like host), `bootMs`, `pullMs`, `images`, `cpus`, `memoryMiB`, `diskFreeMiB`. |
@@ -214,6 +271,38 @@ report. Without one, a container prints one line and exits 0.
   Secret values are only in the `docker` process's environment, never in
   argv or on the agent's disk. Secret names Docker itself reads
   (`DOCKER_*`, `PATH`, `HOME`…) are refused.
+- **`process` runtime.** The same image reference, entrypoint, cmd, env,
+  workdir, user, network (`bridge` or `none`) and `allowImages` policy as
+  Docker. The image is pulled over HTTPS (a private registry uses
+  `spec.registryAuth` for that pull only; the password is not written down).
+  Layers are gzip or uncompressed tar; a zstd layer is refused, with that
+  reason, rather than unpacked wrong. A tag whose manifest is already
+  unpacked here downloads nothing past the manifest.
+  Each run gets its own copy of the unpacked rootfs; the host's
+  `resolv.conf` and `hosts` are copied into it, never through a symlink the
+  image has. bubblewrap is the
+  sandbox when it starts (`--unshare-user`, a pid namespace, the image as
+  `/`), then bubblewrap without the pid namespace,
+  then `unshare --user --map-root-user --root`, then proot, each probed with
+  a run's flags; never the process itself unless `process.sandbox` is
+  `plain`. `network none` drops the network with bubblewrap or
+  `unshare`; proot and plain mode share the machine's network, and `doctor`
+  says so. `bridge` is the machine's own network namespace (there is no
+  separate bridge). Memory and CPU limits are cgroup v2 when this process
+  may create a child cgroup (the job's runner joins it before the job
+  starts, so everything the job forks is inside); otherwise a resident-set
+  watchdog enforces the memory limit (exit 137, `oomKilled`) and CPU is not
+  hard-capped, which `doctor` warns about. Either way the job runs at nice
+  10, as Docker's `--cpu-shares 256` puts a container behind the machine's
+  own work. Logs are the process's stdout and stderr. Secret
+  values are written to the runner's stdin and live in the job's
+  environment, never in argv and never in the state directory. A name
+  matching `LD_*`, `BWRAP_*` or `PROOT_*` is refused, because it would
+  change how the sandbox starts. The runner is the job's parent, so a
+  restart of the agent still collects the exit code. Unpacked digests beyond
+  the 3 most recently used per repository are removed when nothing is
+  running, same as Docker. The machine's label `runtime` is `process`, so a
+  job that requires `runtime=docker` is scheduled elsewhere.
 - **The machine's policy (§4.3)**, which the control plane cannot override:
   images must match `allowImages`, local images need `allowLocalImages`, the
   network is `bridge` or `none`, and a spec asking for privileges, volumes,
@@ -291,9 +380,11 @@ Docker keeps until the container is removed, so the replayed log is redacted
 as before. That is also the limitation: **Docker stores a container's
 environment, secret values included, in its own state (inside the VM for
 Colima) until the container is removed**, which the agent does as soon as the
-result is in the outbox. If the container is gone, or a runtime cannot read
-it back, only the credential patterns apply to what the adopted run prints
-from then on.
+result is in the outbox. The process runtime reads them back from
+`/proc/<pid>/environ` while the job is still running; once it has exited
+they are gone. If the container is gone, or a runtime cannot read it back,
+only the credential patterns apply to what the adopted run prints from then
+on.
 
 ## Services
 
@@ -313,6 +404,12 @@ Templates in [service/](service/):
   `docker`, and `AbandonProcessGroup` so the VM outlives an agent restart.
   Replace `@HOME@`, save it in `~/Library/LaunchAgents/`, then
   `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.homecompute.agent.plist`.
+- **Linux without systemd**: [home-compute-agent-foreground.sh](service/home-compute-agent-foreground.sh)
+  runs `home-compute-agent run` in the foreground and restarts it after a
+  non-zero exit. `run` already exits 0 on SIGTERM, and the script treats
+  that as a stop. Use it under tini, or as the command of a container that
+  has no Docker daemon (`--runtime process`, state directory
+  `/var/lib/home-compute`).
 
 The installer (M6) writes these; by hand they work as described.
 
@@ -363,6 +460,11 @@ npm test --workspace @home-compute/cloud         # includes the end-to-end tests
   ```sh
   agent/scripts/with-test-colima.sh node --test agent/test/docker-real.test.mjs cloud/test-node/docker-integration.test.mjs
   ```
+- **Process runtime** (`test/oci.test.mjs`, `test/process-runtime.test.mjs`,
+  `test/process-real.test.mjs`) pulls through a stand-in registry and, in
+  `process-real`, from Docker Hub: `docker.io/library/busybox:1.36.1` is
+  unpacked and run with no daemon. That test skips when the registry cannot
+  be reached unless `HC_REQUIRE_PROCESS_E2E=1`.
 - **Acceptance on a Mac**: [scripts/acceptance-colima.sh](scripts/acceptance-colima.sh)
   runs hc-web and hc-core under `wrangler dev`, enrols the bundled agent with
   runtime `colima` and a throwaway `hc-test` profile (1 CPU, 1 GiB, 20 s idle

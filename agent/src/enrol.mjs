@@ -38,6 +38,7 @@ export async function machineFacts(config, { runtime, env } = {}) {
     memoryMiB: runtimeFacts.memoryMiB ?? Math.round(os.totalmem() / 1048576),
     diskFreeMiB: runtimeFacts.diskFreeMiB ?? null,
     runtimeVersion: runtimeFacts.version ?? null,
+    sandbox: runtimeFacts.sandbox ?? null,
     caps: config.caps ?? {},
   };
 }

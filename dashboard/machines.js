@@ -319,6 +319,7 @@ function tokenView(token) {
       token.labels && Object.keys(token.labels).length ? h("p", { class: "muted small" }, `Labels: ${labelsText(token.labels)}`) : null),
     commandCard("macos", "2. On a Mac", "The agent runs as you, as a LaunchAgent; Colima starts its own VM only when work is due.", commands.macos),
     commandCard("linux", "2. On Linux (systemd)", "The agent runs as hcagent under systemd; its containers run in home-compute.slice.", commands.linux),
+    commandCard("linux-nodocker", "2. On Linux without Docker", "The agent runs as hcagent in the foreground (under tini when there is no systemd) and runs each image as a process.", commands.linuxNodocker),
     h("p", { class: "muted small" }, "The machine appears under Machines after its first sync, usually within 30 seconds. These steps are in agent/README.md, “Install by hand”."),
     h("div", { class: "actions" },
       h("button", { class: "primary", id: "token-done", onclick: () => { state.joinToken = null; location.hash = "#/machines"; } }, "Done: forget the token")));

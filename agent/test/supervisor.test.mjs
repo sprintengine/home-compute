@@ -27,13 +27,13 @@ async function supervise(t, { script, runtime: options = {}, spec = {}, config =
 
 test("a run goes claimed → starting-vm → pulling → running → reporting, timed by the monotonic clock", async (t) => {
   const { record, phases, runtime, outbox, state, id } = await supervise(t, {
-    script: { output: [{ line: "hello", memoryBytes: 300e6, cpuPct: 50 }, { sleepMs: 120 }, { line: "bye", cpuPct: 90 }], exitCode: 0 },
+    script: { output: [{ line: "hello", memoryBytes: 300e6, cpuPct: 50 }, { sleepMs: 1000 }, { line: "bye", cpuPct: 90 }], exitCode: 0 },
     runtime: { vm: "stopped", bootMs: 60, pullMs: 40 },
   });
   assert.deepEqual(phases, ["starting-vm", "pulling", "running", "reporting"]);
   assert.ok(record.durations.vmWaitMs >= 55 && record.durations.vmWaitMs < 1000, `vm ${record.durations.vmWaitMs}`);
   assert.ok(record.durations.pullMs >= 35 && record.durations.pullMs < 1000, `pull ${record.durations.pullMs}`);
-  assert.ok(record.durations.durationMs >= 110, `duration ${record.durations.durationMs}`);
+  assert.ok(record.durations.durationMs >= 900, `duration ${record.durations.durationMs}`);
   assert.deepEqual([record.exitCode, record.oomKilled, record.timedOut, record.cancelled, record.error], [0, false, false, false, null]);
   assert.equal(record.stats.peakMemoryBytes, 300e6);
   assert.ok(record.stats.samples >= 2 && record.stats.peakCpuPct >= 50);
