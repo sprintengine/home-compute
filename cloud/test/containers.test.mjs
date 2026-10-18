@@ -214,6 +214,32 @@ describe("Cloudflare Containers executor", () => {
     expect(snapshot.body.jobs.find((job) => job.id === "needs").waiting).toMatch(/allowed labels|not set|cloudflare/);
   });
 
+  it("receives secrets allowed to a pool once settings give the executor that label", async () => {
+    await call("/v1/secrets/r2-key", { method: "PUT", body: { value: "s3-secret-value", allowedLabels: { pool: "wingfoil" } }, now: NOW });
+    const runId = await due("pooled", { secretEnv: { AWS_SECRET_ACCESS_KEY: "vault:r2-key" } });
+    const fake = starter();
+    await dispatchCloudflare(env, NOW, { ...fake, image: IMAGE });
+    expect(fake.started).toEqual([]);
+    expect((await stateOf(runId)).state).toBe("due");
+    expect((await call("/v1/settings", { method: "PATCH", body: { cloudflare: { labels: { pool: "wingfoil" } } }, now: NOW })).status).toBe(200);
+    expect((await call("/v1/settings", { method: "PATCH", body: { cloudflare: { labels: { site: "home" } } }, now: NOW })).status).toBe(400);
+    await dispatchCloudflare(env, NOW + 60_000, { ...fake, image: IMAGE });
+    expect(fake.started.map((spec) => spec.runId)).toEqual([runId]);
+    expect(fake.started[0].env.AWS_SECRET_ACCESS_KEY).toBe("s3-secret-value");
+    const [machine] = await rows("SELECT labels_json FROM machines WHERE id = ?", CLOUDFLARE_MACHINE_ID);
+    expect(JSON.parse(machine.labels_json)).toMatchObject({ pool: "wingfoil", runtime: "cloudflare-container", site: "cloudflare" });
+  });
+
+  it("runs a job pinned to the ghcr digest the deployed image was copied from", async () => {
+    const index = `ghcr.io/sprintengine/wingfoil-forecast@sha256:${"ef".repeat(32)}`;
+    const runId = await due("pinned-source", { image: index });
+    const fake = starter();
+    await dispatchCloudflare(env, NOW, { ...fake, image: IMAGE, source: index });
+    expect(fake.started.map((spec) => spec.runId)).toEqual([runId]);
+    const [machine] = await rows("SELECT facts_json FROM machines WHERE id = ?", CLOUDFLARE_MACHINE_ID);
+    expect(JSON.parse(machine.facts_json).imageSource).toBe(index);
+  });
+
   it("does not give the run to an agent, and refuses the reserved label on enrolment", async () => {
     const runId = await due("trial");
     const machine = await enrolMachine("box", { now: NOW });
@@ -330,7 +356,7 @@ describe("Cloudflare Containers executor", () => {
     const set = await call("/v1/jobs/trial/resources", { method: "PATCH", body: { instanceType: "basic", cpus: 0.25, memoryMiB: 1024, diskMiB: 4096 }, now: NOW });
     expect(set.body.resources.instanceType).toBe("basic");
     expect((await call("/v1/settings", { method: "PATCH", body: { cloudflare: { maxConcurrent: 0 } }, now: NOW })).status).toBe(400);
-    expect((await call("/v1/settings", { method: "PATCH", body: { cloudflare: { maxRunSeconds: 600 } }, now: NOW })).body.cloudflare).toEqual({ maxConcurrent: 1, maxRunSeconds: 600 });
+    expect((await call("/v1/settings", { method: "PATCH", body: { cloudflare: { maxRunSeconds: 600 } }, now: NOW })).body.cloudflare).toEqual({ maxConcurrent: 1, maxRunSeconds: 600, labels: {} });
     await dispatchCloudflare(env, NOW, { ...starter(), image: IMAGE });
     const refused = await call(`/v1/machines/${CLOUDFLARE_MACHINE_ID}`, { method: "PATCH", body: { name: "renamed" }, now: NOW });
     expect(refused.status).toBe(400);

@@ -62,6 +62,16 @@ export const CONTAINER_INCLUDED = {
 };
 
 export const EXECUTOR_LABELS = { arch: "amd64", os: "linux", runtime: CLOUDFLARE_RUNTIME, site: "cloudflare" };
+const LABEL_KEY = /^[a-z0-9][a-z0-9._/-]{0,62}$/i;
+
+/**
+ * The executor's labels: its own, plus `settings.cloudflare.labels` (say
+ * `pool=wingfoil`, so secrets allowed to that pool reach it). Its own win:
+ * the extra labels cannot rename its runtime, arch, os or site.
+ */
+export function executorLabels(extra = {}) {
+  return { ...extra, ...EXECUTOR_LABELS };
+}
 
 const TERMINAL_STATES = new Set(["succeeded", "failed", "timed-out", "cancelled", "skipped"]);
 
@@ -121,15 +131,17 @@ export function imageRepository(ref) {
 
 /**
  * Whether a job may run on the deployed image. A job that pins a digest must
- * name the deployed one. A job that names a tag (`…/wingfoil-forecast:production`)
- * runs whatever version of that repository is deployed: Cloudflare cannot
- * pull the tag itself, so the deploy is what moves it.
+ * name the deployed one, or the one it was copied from (`source`: the
+ * multi-platform ghcr digest, whose linux/amd64 image is what Cloudflare
+ * holds). A job that names a tag (`…/wingfoil-forecast:production`) runs
+ * whatever version of that repository is deployed: Cloudflare cannot pull
+ * the tag itself, so the deploy is what moves it.
  */
-export function imagesMatch(jobImage, deployed) {
+export function imagesMatch(jobImage, deployed, source = null) {
   if (typeof jobImage !== "string" || typeof deployed !== "string" || !deployed) return false;
   if (jobImage === deployed) return true;
   const wanted = imageDigest(jobImage);
-  if (wanted) return wanted === imageDigest(deployed);
+  if (wanted) return wanted === imageDigest(deployed) || (Boolean(source) && wanted === imageDigest(source));
   const repository = imageRepository(jobImage);
   return Boolean(repository && repository === imageRepository(deployed));
 }
@@ -222,7 +234,7 @@ export function localSecretNames(job) {
     .map(([name]) => name);
 }
 
-/** `{maxConcurrent, maxRunSeconds}` with the defaults filled in. Throws on a value outside the guard. */
+/** `{maxConcurrent, maxRunSeconds, labels}` with the defaults filled in. Throws on a value outside the guard. */
 export function normaliseGuard(value) {
   const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
   const maxConcurrent = source.maxConcurrent ?? DEFAULT_GUARD.maxConcurrent;
@@ -233,7 +245,16 @@ export function normaliseGuard(value) {
   if (!Number.isInteger(maxRunSeconds) || maxRunSeconds < 30 || maxRunSeconds > ABSOLUTE_MAX_RUN_SECONDS) {
     throw new Error(`cloudflare.maxRunSeconds must be a whole number from 30 to ${ABSOLUTE_MAX_RUN_SECONDS}`);
   }
-  return { maxConcurrent, maxRunSeconds };
+  const labels = source.labels ?? {};
+  if (!labels || typeof labels !== "object" || Array.isArray(labels)) throw new Error("cloudflare.labels must be an object of label: value");
+  const entries = Object.entries(labels).sort(([a], [b]) => a.localeCompare(b));
+  if (entries.length > 8) throw new Error("cloudflare.labels may hold at most 8 labels");
+  for (const [key, label] of entries) {
+    if (!LABEL_KEY.test(key)) throw new Error(`cloudflare.labels: invalid label ${JSON.stringify(key)}`);
+    if (Object.hasOwn(EXECUTOR_LABELS, key)) throw new Error(`cloudflare.labels: ${key} is the executor's own label`);
+    if (typeof label !== "string" || !label || label.length > 63) throw new Error(`cloudflare.labels.${key} must be a string of 1 to 63 characters`);
+  }
+  return { maxConcurrent, maxRunSeconds, labels: Object.fromEntries(entries) };
 }
 
 /**

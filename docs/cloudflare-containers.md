@@ -75,19 +75,24 @@ is pushed into Cloudflare's registry and named in `wrangler.core.jsonc`, so
 ```sh
 cd cloud
 npx wrangler login
-docker login ghcr.io
+brew install crane                      # or have Docker running instead
+gh auth token | crane auth login ghcr.io -u <github user> --password-stdin   # token with read:packages
 ./scripts/set-container-image.sh ghcr.io/sprintengine/wingfoil-forecast:production --deploy
 ```
 
-The script pulls the amd64 image, pushes it, and writes the pushed digest
-into every container class's `image` and into `vars.HC_CONTAINER_IMAGE`, then
-deploys. Running containers keep their image until their run ends.
+The script copies the image's linux/amd64 platform into Cloudflare's
+registry (with `crane`, no Docker needed), writes the copy's digest into
+every container class's `image` and into `vars.HC_CONTAINER_IMAGE`, writes the
+source's multi-platform digest into `vars.HC_CONTAINER_SOURCE`, then deploys.
+Running containers keep their image until their run ends.
 
 A job's `image` decides whether it may run on the deployed image:
 - **A tag** (`ghcr.io/sprintengine/wingfoil-forecast:production`) runs
   whichever version of that repository was last deployed. The same job
   definition works on a machine and on Cloudflare.
-- **A pinned digest** must be the deployed digest.
+- **A pinned digest** must be the deployed digest, or the source digest it
+  was copied from (a job pinned to `ghcr.io/…@sha256:<multi-platform digest>`
+  runs on its amd64 copy).
 - **Any other repository** fails the run with both names.
 
 The run's `image_digest` records what actually ran.
@@ -104,7 +109,9 @@ The run's `image_digest` records what actually ran.
   Debian, Alpine or Python image has. A distroless image does not.
 - **Secrets:** `vault:` secrets only. `local:` lives on one machine. A
   secret whose `allowedLabels` do not match the executor (say `site=home`)
-  leaves the run `due`.
+  leaves the run `due`. Give the executor extra labels in settings, say
+  `{"cloudflare": {"labels": {"pool": "wingfoil"}}}`, for secrets allowed to a
+  pool. Its own `arch`, `os`, `runtime` and `site` cannot be changed.
 - **Storage:** no R2 binding inside the container. Pass the bucket's S3 keys
   as vault secrets, as on a machine.
 - **Limits:** `timeouts.runSeconds` no more than `settings.cloudflare.maxRunSeconds`
@@ -141,7 +148,8 @@ Nothing here is done by deploying this branch.
    it only to retire the executor: a revoked row is not recreated.
 
 Guardrails are in settings `cloudflare`: `maxConcurrent` (default 1, range
-1–20) and `maxRunSeconds` (default 1200, hard cap 1200). `max_instances` in
+1–20), `maxRunSeconds` (default 1200, hard cap 1200), and `labels` (extra
+executor labels, above). `max_instances` in
 `wrangler.core.jsonc` is the hard cap Cloudflare enforces (1). Raise both
 together, and deploy hc-core.
 

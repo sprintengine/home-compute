@@ -10,8 +10,8 @@
 
 import {
   CLOUDFLARE_LEASE_MS, CLOUDFLARE_MACHINE_ID, CLOUDFLARE_MACHINE_NAME, CLOUDFLARE_RUNTIME, CONTAINER_INCLUDED, CONTAINER_PRICES,
-  DEFAULT_GUARD, EXECUTOR_LABELS, INSTANCE_BINDINGS, INSTANCE_TYPES, containerCommand, deployedInstanceTypes, estimateContainerCost,
-  exitCodeFromError, imageDigest, imagesMatch, interpretExit, localSecretNames, normaliseGuard, selectInstanceType, startIsTransient,
+  DEFAULT_GUARD, INSTANCE_BINDINGS, INSTANCE_TYPES, containerCommand, deployedInstanceTypes, estimateContainerCost,
+  executorLabels, exitCodeFromError, imageDigest, imagesMatch, interpretExit, localSecretNames, normaliseGuard, selectInstanceType, startIsTransient,
   targetsCloudflare,
 } from "../../src/core/cloudflare.mjs";
 import { boundLines, extractError } from "../../src/core/logs.mjs";
@@ -75,7 +75,7 @@ export async function secretValuesForJob(env, jobId) {
   const names = job ? vaultNames(job) : [];
   if (!names.length) return [];
   try {
-    const opened = await openSecretsFor(env.DB, env, names, EXECUTOR_LABELS);
+    const opened = await openSecretsFor(env.DB, env, names, executorLabels((await loadGuard(env.DB)).labels));
     return Object.values(opened.values).filter((value) => typeof value === "string");
   } catch (error) {
     console.error(JSON.stringify({ event: "container_redaction_secrets_error", job: jobId, error: safeError(error) }));
@@ -231,7 +231,7 @@ function capacityOf(deployed, guard) {
 
 /** Creates the virtual machine the first time a job targets it. A revoked row stays revoked. */
 async function ensureExecutor(db, now, guard, deployed) {
-  const existing = await db.prepare("SELECT id, revoked_at, drain, last_seen_at, facts_json, capacity_json FROM machines WHERE id = ?").bind(CLOUDFLARE_MACHINE_ID).first();
+  const existing = await db.prepare("SELECT id, revoked_at, drain, last_seen_at, facts_json, capacity_json, labels_json FROM machines WHERE id = ?").bind(CLOUDFLARE_MACHINE_ID).first();
   if (existing) return existing;
   const named = await db.prepare("SELECT id FROM machines WHERE name = ?").bind(CLOUDFLARE_MACHINE_NAME).first();
   if (named) {
@@ -244,20 +244,24 @@ async function ensureExecutor(db, now, guard, deployed) {
         credential_hash, credential_issued_at, drain, enrolled_at)
       VALUES (?1, ?2, ?3, '', ?4, '{}', '{"docker":"ok"}', NULL, ?5, ?6, 0, ?6)
       ON CONFLICT DO NOTHING`).bind(
-      CLOUDFLARE_MACHINE_ID, CLOUDFLARE_MACHINE_NAME, JSON.stringify(EXECUTOR_LABELS), JSON.stringify(capacity), randomHex(32), now,
+      CLOUDFLARE_MACHINE_ID, CLOUDFLARE_MACHINE_NAME, JSON.stringify(executorLabels(guard.labels)), JSON.stringify(capacity), randomHex(32), now,
     ),
     bumpMachinesVersion(db),
   ]);
-  if (inserted[0].meta.changes !== 1) return db.prepare("SELECT id, revoked_at, drain, last_seen_at, facts_json, capacity_json FROM machines WHERE id = ?").bind(CLOUDFLARE_MACHINE_ID).first();
-  return { id: CLOUDFLARE_MACHINE_ID, revoked_at: null, drain: 0, last_seen_at: null, facts_json: "{}", capacity_json: JSON.stringify(capacity) };
+  if (inserted[0].meta.changes !== 1) return db.prepare("SELECT id, revoked_at, drain, last_seen_at, facts_json, capacity_json, labels_json FROM machines WHERE id = ?").bind(CLOUDFLARE_MACHINE_ID).first();
+  return {
+    id: CLOUDFLARE_MACHINE_ID, revoked_at: null, drain: 0, last_seen_at: null, facts_json: "{}", capacity_json: JSON.stringify(capacity),
+    labels_json: JSON.stringify(executorLabels(guard.labels)),
+  };
 }
 
 /** What the dashboard's machine page shows for the executor: the deployed image and sizes, the guard, and the 30-day cost. */
-async function touchExecutor(db, row, now, guard, usage, { deployed, image }) {
+async function touchExecutor(db, row, now, guard, usage, { deployed, image, source }) {
   const facts = {
     runtime: "cloudflare-containers", os: "linux", arch: "amd64",
     image: image || null,
     imageDigest: imageDigest(image),
+    imageSource: source || null,
     instanceTypes: deployed,
     containerSeconds30d: usage.containerSeconds,
     estimatedUsd30d: Number(usage.estimatedUsd.toFixed(6)),
@@ -266,10 +270,16 @@ async function touchExecutor(db, row, now, guard, usage, { deployed, image }) {
   };
   const factsJson = JSON.stringify(facts);
   const capacityJson = JSON.stringify(capacityOf(deployed, guard));
+  const labelsJson = JSON.stringify(executorLabels(guard.labels));
   const stale = row.last_seen_at === null || now - row.last_seen_at >= 60_000;
-  if (!stale && factsJson === row.facts_json && capacityJson === (row.capacity_json ?? "")) return;
-  await db.prepare(`UPDATE machines SET facts_json = ?1, capacity_json = ?2, health_json = '{"docker":"ok"}', last_seen_at = ?3
-    WHERE id = ?4 AND revoked_at IS NULL`).bind(factsJson, capacityJson, now, CLOUDFLARE_MACHINE_ID).run();
+  const relabelled = labelsJson !== (row.labels_json ?? labelsJson);
+  if (!stale && !relabelled && factsJson === row.facts_json && capacityJson === (row.capacity_json ?? "")) return;
+  // A change of labels (settings.cloudflare.labels) is a change of machines: dashboards are told.
+  await db.batch([
+    db.prepare(`UPDATE machines SET facts_json = ?1, capacity_json = ?2, labels_json = ?5, health_json = '{"docker":"ok"}', last_seen_at = ?3
+      WHERE id = ?4 AND revoked_at IS NULL`).bind(factsJson, capacityJson, now, CLOUDFLARE_MACHINE_ID, labelsJson),
+    ...(relabelled ? [bumpMachinesVersion(db)] : []),
+  ]);
 }
 
 async function stampContainerSeconds(db) {
@@ -338,7 +348,7 @@ function secretEnv(job, values) {
 }
 
 /** Why this run cannot start on Cloudflare at all (it is claimed and failed so the schedule moves on), or an empty list. */
-function startProblems(job, selected, guard, image) {
+function startProblems(job, selected, guard, image, source) {
   const problems = [];
   if (!selected.ok) problems.push(selected.error);
   if (job.timeouts.runSeconds > guard.maxRunSeconds) {
@@ -347,7 +357,7 @@ function startProblems(job, selected, guard, image) {
   const local = localSecretNames(job);
   if (local.length) problems.push(`local: secrets are not available on Cloudflare Containers (${local.join(", ")}); use vault: secrets`);
   if (!image) problems.push("no Cloudflare container image is deployed: run cloud/scripts/set-container-image.sh, then deploy hc-core");
-  else if (!imagesMatch(job.image, image)) problems.push(`job image ${job.image} is not the image deployed on Cloudflare (${image})`);
+  else if (!imagesMatch(job.image, image, source)) problems.push(`job image ${job.image} is not the image deployed on Cloudflare (${image})`);
   if (!containerCommand(job, [])) problems.push("a Cloudflare job needs an entrypoint: the image's own entrypoint cannot be wrapped to read its output");
   return problems;
 }
@@ -365,6 +375,7 @@ export async function dispatchCloudflare(env, now, options = {}) {
   const summary = { jobs: 1, started: 0, failed: 0, leftDue: 0 };
   const deployed = options.deployed ?? (options.starter ? ["basic"] : deployedInstanceTypes(env));
   const image = options.image ?? env.HC_CONTAINER_IMAGE ?? "";
+  const source = options.source ?? env.HC_CONTAINER_SOURCE ?? "";
   const guard = await loadGuard(db);
   const row = await ensureExecutor(db, now, guard, deployed);
   if (row?.error) return { ...summary, error: row.error };
@@ -373,7 +384,7 @@ export async function dispatchCloudflare(env, now, options = {}) {
   await checkActive(env, db, now);
   const usage = () => containerUsage(db, now, guard);
   if (row?.drain === 1) {
-    await touchExecutor(db, row, now, guard, await usage(), { deployed, image });
+    await touchExecutor(db, row, now, guard, await usage(), { deployed, image, source });
     return { ...summary, drained: true };
   }
   const [versionRow, secretsRow, pauseRow] = (await db.batch([
@@ -396,7 +407,7 @@ export async function dispatchCloudflare(env, now, options = {}) {
     .filter((entry) => entry.job && targetsCloudflare(entry.job))
     .sort((a, b) => (b.job.policy?.priority ?? 0) - (a.job.policy?.priority ?? 0) || a.run.due_at - b.run.due_at);
   const starter = options.starter ?? starterFromEnv(env);
-  const labels = EXECUTOR_LABELS;
+  const labels = executorLabels(guard.labels);
   for (const { run, job } of candidates) {
     if (run.source !== "manual" && (!job.enabled || job.paused || globalPause)) continue;
     if (claimBlockers(job, secrets).length || secretsRefused(job, { labels }, secrets).length) {
@@ -408,7 +419,7 @@ export async function dispatchCloudflare(env, now, options = {}) {
       continue;
     }
     const selected = selectInstanceType(job.resources, deployed);
-    const problems = startProblems(job, selected, guard, image);
+    const problems = startProblems(job, selected, guard, image, source);
     const held = selected.ok ? selected : { name: job.resources.instanceType ?? "basic", vcpu: null, memoryMiB: job.resources.memoryMiB, diskMiB: job.resources.diskMiB };
     if (!await claimRun(db, run, job, held, image, now)) continue;
     if (problems.length) {
@@ -463,7 +474,7 @@ export async function dispatchCloudflare(env, now, options = {}) {
       summary.failed += 1;
     }
   }
-  await touchExecutor(db, row, now, guard, await usage(), { deployed, image });
+  await touchExecutor(db, row, now, guard, await usage(), { deployed, image, source });
   return summary;
 }
 
