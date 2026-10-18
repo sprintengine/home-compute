@@ -8,13 +8,14 @@
     "AWS_SECRET_ACCESS_KEY": "wingfoil-r2-secret"
   },
   "env": { "AWS_REGION": "auto", "FORCE5_SIDECARS": "0", "ECMWF_SOURCE": "ecmwf" },
-  "placement": { "preferMachines": ["mac-mini"], "preferWaitSeconds": 300 },
+  "placement": { "requireLabels": { "pool": "wingfoil" }, "preferMachines": ["mac-mini"], "preferWaitSeconds": 300 },
   "policy": {
     "overlap": "coalesce",
     "catchUp": "latest",
     "retry": { "maxAttempts": 3, "onLostRunning": true, "onFailed": 0 }
   },
   "network": "bridge",
+  "registryAuth": "vault:ghcr-read",
   "variables": { "WINGFOIL_IMAGE": "ghcr.io/sprintengine/wingfoil-forecast:production" },
   "freshness": {
     "$comment": "The stale-output alert. maxAgeHours per model is the limit Wingfoil's status page calls stale (force5/ingest/registry.py); pointer is the model's published manifest on the data domain, read every 15 minutes, so the alert works whichever system ran the job.",
