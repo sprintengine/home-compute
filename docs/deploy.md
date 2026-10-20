@@ -99,8 +99,13 @@ owner's, in the Cloudflare dashboard:
    tag. `BOOTSTRAP_ADMINS` (already a secret) makes the owner an admin.
 4. For the CLI and, later, the menu bar app: **Access › Service auth ›
    Create service token**, add a *Service Auth* rule for it to the
-   application's policy, and give it a role in the dashboard (Settings ›
-   Roles: `service:<client id>` → `admin` for the CLI). The CLI reads
+   application's policy, and give it a role in the dashboard. Open
+   **Settings › Roles**, choose **Edit**, and add `service:<client id>`
+   (admin for the CLI, operator for the menu bar app). An email is added
+   the same way: viewer, operator or admin. Save replaces the `roles` map
+   through `PATCH /v1/settings`. Logins in `BOOTSTRAP_ADMINS` always stay
+   admin and are not editable. The save is refused if it would remove your
+   own admin role or leave no admin at all. The CLI reads
    `HC_ACCESS_CLIENT_ID` and `HC_ACCESS_CLIENT_SECRET`.
 
 Alternatively, an API token with *Access: Apps and Policies — Edit* and

@@ -230,7 +230,7 @@ describe("the hosted dashboard in a browser", { skip, timeout: 600_000 }, () => 
         assert.equal(await page.locator("#run-cancel, #run-retry").count(), 0);
         await page.goto(`${stack.web}/#/settings`);
         await page.locator("#me-title").waitFor();
-        assert.equal(await page.locator("#global-pause, #settings-edit").count(), 0);
+        assert.equal(await page.locator("#global-pause, #settings-edit, #roles-edit").count(), 0);
         const refused = await page.evaluate(async () => {
           const response = await fetch("/v1/jobs/hello/run", {
             method: "POST", headers: { "content-type": "application/json", "x-hc-csrf": window.homeCompute.state.session.csrfToken }, body: "{}",
@@ -282,6 +282,50 @@ describe("the hosted dashboard in a browser", { skip, timeout: 600_000 }, () => 
     const { page, context } = await open(VIEWPORTS[1], null, "#/settings");
     await page.locator("#me-title").waitFor();
     assert.match(await page.locator("main").innerText(), new RegExp(`Signed in as\\s+${DEV_USER.replace(".", "\\.")}[\\s\\S]*Role\\s+admin`));
+    await context.close();
+  });
+
+  it("adds, changes and removes a role from Settings", async () => {
+    const login = "service:menu.bar";
+    const { page, context } = await open(VIEWPORTS[1], ADMIN, "#/settings");
+    const card = () => page.locator("section[aria-labelledby='rl-title'], form[data-edit='roles']");
+    await page.locator("#roles-edit").waitFor();
+    assert.match(await card().innerText(), /owner@example.com[\s\S]*admin · always/);
+    await page.click("#roles-edit");
+    await page.click("#roles-add");
+    const row = page.locator(".role-row").last();
+    await row.locator("input").fill(login);
+    await row.locator("select").selectOption("operator");
+    const patch = page.waitForRequest((request) => request.url().endsWith("/v1/settings") && request.method() === "PATCH");
+    const savedView = () => page.locator("section[aria-labelledby='rl-title']").waitFor();
+    await page.click("#roles-save");
+    const request = await patch;
+    assert.ok(request.headers()["x-hc-csrf"], "the CSRF token goes with the roles change");
+    assert.equal(request.postDataJSON().roles[login], "operator");
+    await page.locator("#toast", { hasText: "Saved: roles" }).waitFor();
+    await savedView();
+    assert.match(await page.locator("section[aria-labelledby='rl-title']").innerText(), /service:menu\.bar\s+operator/);
+    assert.equal((await stack.api("/v1/settings")).roles[login], "operator");
+
+    await page.click("#roles-edit");
+    await page.locator('.role-row[data-login="service:menu.bar"] select').selectOption("admin");
+    const changed = page.waitForResponse((response) => response.url().endsWith("/v1/settings") && response.request().method() === "PATCH");
+    await page.click("#roles-save");
+    assert.equal((await changed).status(), 200);
+    await savedView();
+    assert.match(await page.locator("section[aria-labelledby='rl-title']").innerText(), /service:menu\.bar\s+admin/);
+    assert.equal((await stack.api("/v1/settings")).roles[login], "admin");
+
+    await page.click("#roles-edit");
+    await page.click('[aria-label="Remove service:menu.bar"]');
+    const removed = page.waitForResponse((response) => response.url().endsWith("/v1/settings") && response.request().method() === "PATCH");
+    await page.click("#roles-save");
+    assert.equal((await removed).status(), 200);
+    await savedView();
+    assert.doesNotMatch(await page.locator("section[aria-labelledby='rl-title']").innerText(), /service:menu\.bar/);
+    const restored = await stack.api("/v1/settings");
+    assert.equal(restored.roles[login], undefined);
+    assert.equal(restored.roles[VIEWER], "viewer");
     await context.close();
   });
 

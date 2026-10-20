@@ -1,9 +1,9 @@
 import { env } from "cloudflare:workers";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { accessSettings, clearAccessKeys, roleOf, verifyAccessJwt } from "../src/access.mjs";
+import { accessSettings, clearAccessKeys, roleOf, rolesRefusal, verifyAccessJwt } from "../src/access.mjs";
 import { handle } from "../src/hc-web.mjs";
 import {
-  AUD, call, CERTS, KID, mintJwt, mockCertificates, OWNER, resetDatabase, serviceClaims, strangerKey, TEAM, teamJwks, userClaims,
+  AUD, call, CERTS, KID, mintJwt, mockCertificates, OWNER, resetDatabase, rows, serviceClaims, strangerKey, TEAM, teamJwks, userClaims,
 } from "./helpers.mjs";
 
 const settings = accessSettings(env);
@@ -130,6 +130,104 @@ describe("hc-web authentication and roles", () => {
     expect(session.body).toMatchObject({ kind: "service", login: "service:menubar.access", role: "operator" });
     expect(session.body.csrfToken).toBeUndefined();
     expect(roleOf("x@example.com", { roles: { "x@example.com": "root" } })).toBe(null, "unknown roles grant nothing");
+    expect(roleOf("Owner@Example.com", { bootstrapAdmins: " owner@example.com, service:CLI " })).toBe("admin");
+    expect(roleOf("service:CLI", { bootstrapAdmins: "service:cli" })).toBe("admin");
+    expect(roleOf("service:CLI", { roles: { "service:cli": "operator" } })).toBe("operator");
+  });
+
+  it("adds, changes and removes roles, and audits only a change that passes CSRF", async () => {
+    const forged = await call("/v1/settings", {
+      method: "PATCH", headers: { "x-hc-csrf": undefined }, body: { roles: { "person@example.com": "admin" } },
+    });
+    expect(forged.body).toEqual({ error: "csrf_check_failed", reason: "csrf_token" });
+    expect((await call("/v1/settings")).body.roles).toEqual({});
+    expect(await rows("SELECT action FROM audit_log")).toEqual([]);
+
+    for (const roles of [null, [], { "not-an-email": "viewer" }, { "service:": "viewer" }, { "a@b.com": "god" }, { "A@b.com": "admin", "a@b.com": "viewer" }]) {
+      const refused = await call("/v1/settings", { method: "PATCH", body: { roles } });
+      expect(refused.status, JSON.stringify(roles)).toBe(400);
+    }
+    expect(await rows("SELECT action FROM audit_log")).toEqual([], "a refused roles change is not audited");
+
+    const added = await call("/v1/settings", { method: "PATCH", body: { roles: {
+      "Person@Example.com": "viewer", "Service:Menubar.Access": "operator",
+    } } });
+    expect(added.status).toBe(200);
+    expect(added.body.roles).toEqual({ "person@example.com": "viewer", "service:Menubar.Access": "operator" });
+    expect(added.body.bootstrapAdmins).toEqual([OWNER]);
+    expect(added.body.changed).toEqual(["roles"]);
+    const audit = await call("/v1/audit?limit=1");
+    expect(audit.body.entries[0]).toMatchObject({
+      actor: OWNER, action: "settings.update", target: "roles",
+      before: { roles: {} },
+      after: { roles: { "person@example.com": "viewer", "service:Menubar.Access": "operator" } },
+    });
+
+    const changed = await call("/v1/settings", { method: "PATCH", body: { roles: {
+      "person@example.com": "operator", "service:Menubar.Access": "admin",
+    } } });
+    expect(changed.body.roles).toEqual({ "person@example.com": "operator", "service:Menubar.Access": "admin" });
+    expect((await call("/v1/session", { identity: "service:Menubar.Access" })).body.role).toBe("admin");
+
+    const removed = await call("/v1/settings", { method: "PATCH", identity: "service:Menubar.Access", body: { roles: {
+      "service:Menubar.Access": "admin",
+    } } });
+    expect(removed.status).toBe(200);
+    expect(removed.body.roles).toEqual({ "service:Menubar.Access": "admin" });
+    expect((await call("/v1/snapshot", { identity: "person@example.com" })).body.error).toBe("no_role");
+
+    expect((await call("/v1/settings", { method: "PATCH", identity: "person@example.com", body: { roles: { "person@example.com": "admin" } } })).status).toBe(403);
+    await call("/v1/settings", { method: "PATCH", body: { roles: { "op@example.com": "operator", "service:Menubar.Access": "admin" } } });
+    expect((await call("/v1/settings", {
+      method: "PATCH", identity: "op@example.com", body: { roles: { "op@example.com": "admin" } },
+    })).body).toEqual({ error: "forbidden", role: "operator", needs: "admin" });
+  });
+
+  it("refuses a roles change that removes the last admin or the caller's own admin role", async () => {
+    expect(rolesRefusal({}, { actor: OWNER, bootstrapAdmins: OWNER })).toBe(null);
+    expect(rolesRefusal({ [OWNER]: "viewer" }, { actor: OWNER, bootstrapAdmins: OWNER })).toMatch(/bootstrap admin/);
+    expect(rolesRefusal({}, { actor: "second@example.com", bootstrapAdmins: "" })).toBe("At least one admin must remain");
+    expect(rolesRefusal({ "other@example.com": "admin" }, { actor: "second@example.com", bootstrapAdmins: "" })).toBe("That would remove your own admin role");
+
+    const demoted = await call("/v1/settings", { method: "PATCH", body: { roles: { [OWNER]: "viewer", "second@example.com": "admin" } } });
+    expect(demoted.status).toBe(400);
+    expect(demoted.body.error).toMatch(/bootstrap admin/);
+    expect((await call("/v1/settings")).body.roles).toEqual({});
+
+    await call("/v1/settings", { method: "PATCH", body: { roles: { "second@example.com": "admin", "third@example.com": "admin" } } });
+    const self = await call("/v1/settings", {
+      method: "PATCH", identity: "second@example.com", body: { roles: { "third@example.com": "admin" } },
+    });
+    expect(self.status).toBe(400);
+    expect(self.body.error).toBe("That would remove your own admin role");
+    expect((await call("/v1/session", { identity: "second@example.com" })).body.role).toBe("admin");
+
+    const byOther = await call("/v1/settings", {
+      method: "PATCH", identity: "third@example.com", body: { roles: { "third@example.com": "admin" } },
+    });
+    expect(byOther.status).toBe(200);
+    expect((await call("/v1/snapshot", { identity: "second@example.com" })).body).toEqual({ error: "no_role", login: "second@example.com" });
+
+    const cleared = await call("/v1/settings", { method: "PATCH", body: { roles: {} } });
+    expect(cleared.status).toBe(200, "a bootstrap admin can clear the map and still be admin");
+    expect((await call("/v1/session")).body.role).toBe("admin");
+
+    await call("/v1/settings", { method: "PATCH", body: { roles: { "second@example.com": "admin" } } });
+    const bare = { ...env, BOOTSTRAP_ADMINS: "" };
+    const last = await call("/v1/settings", {
+      method: "PATCH", identity: "second@example.com", environment: bare, body: { roles: { "viewer@example.com": "viewer" } },
+    });
+    expect(last.status).toBe(400);
+    expect(last.body.error).toBe("At least one admin must remain");
+    expect((await call("/v1/settings")).body.roles).toEqual({ "second@example.com": "admin" });
+
+    const service = await call("/v1/settings", { method: "PATCH", body: { roles: { "service:cli.access": "admin" } } });
+    expect(service.status).toBe(200);
+    const serviceLock = await call("/v1/settings", {
+      method: "PATCH", identity: "service:cli.access", body: { roles: {} },
+    });
+    expect(serviceLock.status).toBe(400);
+    expect(serviceLock.body.error).toBe("That would remove your own admin role");
   });
 
   it("takes DEV_ACCESS_EMAIL only on localhost, for wrangler dev", async () => {
