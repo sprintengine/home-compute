@@ -8,6 +8,7 @@ import {
   accessSettings, AccessError, allows, csrfTokenFor, identityOf, roleOf, verifyAccessJwt,
 } from "./access.mjs";
 import * as api from "./api.mjs";
+import { getContainers } from "./containers.mjs";
 import * as fleet from "./fleet-api.mjs";
 import * as vault from "./secrets.mjs";
 import { alertState, testAlertStatements } from "./alerts.mjs";
@@ -41,6 +42,7 @@ export const ROUTES = [
   ["GET", `/v1/runs/${RUN}/logs`, "viewer", api.runLogs],
   ["POST", `/v1/runs/${RUN}/cancel`, "operator", api.cancelRun],
   ["POST", `/v1/runs/${RUN}/retry`, "operator", api.retryRun],
+  ["GET", "/v1/containers", "viewer", getContainers],
   ["GET", "/v1/machines", "viewer", fleet.listMachines],
   ["GET", `/v1/machines/${MACHINE}`, "viewer", fleet.getMachine],
   ["GET", `/v1/machines/${MACHINE}/runs`, "viewer", fleet.machineRuns],
@@ -103,7 +105,26 @@ async function asset(request, env, url) {
   return env.ASSETS.fetch(request);
 }
 
-async function respond(request, env, now) {
+/** Routes after which a Cloudflare container may need starting or stopping now, not at the next cron minute. */
+const DISPATCH_AFTER = new Set([api.runJob, api.cancelRun, api.retryRun]);
+
+/** Asks hc-core to dispatch at once. Best effort: the cron does the same within a minute. */
+function nudgeContainers(env, ctx) {
+  if (!env.HC_CORE || !ctx?.waitUntil) return;
+  // Never fails the request it follows: a binding that throws at once (hc-core not
+  // deployed, or not running beside a dev hc-web) is as harmless as one that rejects.
+  let work;
+  try {
+    work = Promise.resolve(env.HC_CORE.dispatch());
+  } catch (error) {
+    work = Promise.reject(error);
+  }
+  ctx.waitUntil(work.catch((error) => {
+    console.warn(JSON.stringify({ event: "containers_nudge_failed", error: String(error?.message ?? error) }));
+  }));
+}
+
+async function respond(request, env, now, ctx) {
   const url = new URL(request.url);
   if (!url.pathname.startsWith("/v1/")) return asset(request, env, url);
   if (url.pathname === "/v1/health") return json(200, { status: "ok", service: "hc-web" });
@@ -154,21 +175,23 @@ async function respond(request, env, now) {
     });
     if (refusal) return json(403, { error: "csrf_check_failed", reason: refusal });
   }
-  return found.handler({
+  const response = await found.handler({
     db: env.DB, env, request, url, params: found.params, identity, role, now,
     ip: request.headers.get("cf-connecting-ip"),
   });
+  if (DISPATCH_AFTER.has(found.handler) && response.status < 300) nudgeContainers(env, ctx);
+  return response;
 }
 
 /** hc-web's answer to a request; `now` (epoch ms) is for tests. */
-export async function handle(request, env, { now = Date.now() } = {}) {
+export async function handle(request, env, { now = Date.now(), ctx = null } = {}) {
   try {
-    return await respond(request, env, now);
+    return await respond(request, env, now, ctx);
   } catch (error) {
     return errorResponse(error);
   }
 }
 
 export default {
-  fetch: (request, env) => handle(request, env),
+  fetch: (request, env, ctx) => handle(request, env, { ctx }),
 };

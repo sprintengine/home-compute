@@ -183,8 +183,10 @@ describe("the hosted dashboard in a browser", { skip, timeout: 600_000 }, () => 
         const token = await page.locator("#join-token").inputValue();
         assert.match(token, /^hcj_[A-Za-z0-9_-]{43}$/);
         const commands = await page.locator("pre.commands").allInnerTexts();
-        assert.equal(commands.length, 6);
+        // Three steps each for a Mac, Linux with systemd, and Linux without Docker.
+        assert.equal(commands.length, 9);
         assert.ok(commands.every((text) => !text.includes(token)), "the token is never in a command");
+        assert.ok(commands.some((text) => text.includes("--runtime process") && text.includes("--state-dir /var/lib/home-compute")));
         assert.ok(commands.some((text) => text.includes(`--server ${stack.core} --join-token-stdin`)));
         await page.click("#token-done");
         await page.waitForURL(/#\/machines$/);

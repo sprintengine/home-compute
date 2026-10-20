@@ -37,9 +37,10 @@ function decodePart(text, what) {
   }
 }
 
-/** The settings the Worker's vars give: the team domain, the AUD tag and, rarely, another certificate URL. */
+/** The team domain, the AUD tag and, rarely, another certificate URL, from the Worker's environment. */
 export function accessSettings(env) {
-  const team = String(env.ACCESS_TEAM_DOMAIN ?? "").trim().replace(/^https:\/\//, "").replace(/\/+$/, "");
+  // A pasted URL (`http://team.cloudflareaccess.com/`) is the same hostname. Any scheme, then trailing slashes.
+  const team = String(env.ACCESS_TEAM_DOMAIN ?? "").trim().replace(/^[a-z]+:\/\//i, "").replace(/\/+$/, "");
   const audience = String(env.ACCESS_AUD ?? "").trim();
   return {
     team,

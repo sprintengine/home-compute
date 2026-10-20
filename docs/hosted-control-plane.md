@@ -29,7 +29,7 @@ resources, a timeout, a schedule and placement. Wingfoil is a preset.
 
 | Question | Decision |
 | --- | --- |
-| Store | **D1** (one database, `--location weur`). Durable Objects are not used in v1. |
+| Store | **D1** (one database, `--location weur`). Durable Objects are not used in v1, except the optional Cloudflare Containers executor ([cloudflare-containers.md](cloudflare-containers.md)), which adds one SQLite-backed class on hc-core. |
 | Due runs | **Cron Trigger `* * * * *`** materialises slots. Agent syncs also materialise lazily. Both are idempotent through `UNIQUE(job_id, slot_at)`. |
 | Workers | **Two Workers, one codebase**: `hc-web` (dashboard + human API, behind Access) and `hc-core` (agent API + cron, per-machine tokens, never serves people). |
 | Agent language | **Node 22, one dependency-free ESM file**, sharing `src/core/` with the Workers. Go is deferred (§4.1). |
@@ -963,8 +963,9 @@ overwrites a field edited in the dashboard since the last import unless `--force
 anyone who wants the repo to follow, `home-compute cloud export --preset wingfoil --as schedules-set`
 prints the `schedules.py --set …` commands that would bring `jobs.toml` up to date.
 
-The Cloudflare Containers deployment (`deploy/cloudflare/`) is unaffected. It is a separate,
-paid-plan way to run the same timetable and must not run alongside this one.
+Wingfoil's separate Cloudflare Containers deployment (`deploy/cloudflare/`) has been removed:
+a job runs on Cloudflare Containers through this control plane instead, by its placement
+([cloudflare-containers.md](cloudflare-containers.md)).
 
 ---
 
@@ -1136,9 +1137,9 @@ Backups: D1 Time Travel (7 d) plus a weekly Home Compute job that runs `wrangler
 - What should notifications on failure use: Web Push, email, or the menu bar app only?
   *Answered (2026-10-12): email through Email Routing, plus a GitHub issue from the dead-man
   check (§13).*
-- Should a Cloudflare Containers "burst machine" (paid plan, reusing `deploy/cloudflare`) pick up
-  `due` runs when no home machine is online for more than N minutes? The design allows it as just
-  another claimant; it is out of scope for the free-tier build.
+- Should the Cloudflare Containers executor also act as a "burst machine", picking up `due` runs
+  when no home machine is online for more than N minutes? Today a job runs there only when its
+  placement asks for `runtime=cloudflare-container` ([cloudflare-containers.md](cloudflare-containers.md)).
 
 ---
 

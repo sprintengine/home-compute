@@ -2,10 +2,26 @@
 // no dashboard, no /v1, no Access in front. Agents authenticate with their
 // own machine credentials (§5, §7).
 
+import { WorkerEntrypoint } from "cloudflare:workers";
 import { handleAgent } from "./agent-api.mjs";
 import { errorResponse, json } from "./http.mjs";
 import { CRON_STALE_MS } from "./alerts.mjs";
 import { minute } from "./cron.mjs";
+
+export { HcContainerBasic, HcContainerLite, HcContainerStandard1 } from "./container-do.mjs";
+
+/**
+ * hc-web's way in (a service binding, never a public route): after Run now,
+ * Cancel or Retry on a Cloudflare job, check and start containers at once
+ * instead of at the next cron minute. Safe beside the cron: every claim is a
+ * compare-and-set and each run's object checks one at a time.
+ */
+export class Dispatcher extends WorkerEntrypoint {
+  async dispatch() {
+    const { dispatchCloudflare } = await import("./containers.mjs");
+    return dispatchCloudflare(this.env, Date.now());
+  }
+}
 
 /**
  * GET /health: the Worker answers (200), with the cron's last tick. GET
@@ -49,8 +65,10 @@ export default {
   async scheduled(controller, env, ctx) {
     const summary = await minute(env, controller.scheduledTime);
     const alerts = summary.alerts ?? {};
+    const containers = summary.containers ?? {};
     if (summary.materialised.created || summary.lost || summary.retried || summary.timedOut || summary.retention
-      || alerts.error || alerts.opened || alerts.resolved || alerts.emailed) {
+      || alerts.error || alerts.opened || alerts.resolved || alerts.emailed
+      || containers.started || containers.failed || containers.error) {
       console.log(JSON.stringify({ event: "cron", cron: controller.cron, ...summary }));
     }
     return summary;

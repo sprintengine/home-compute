@@ -337,8 +337,23 @@ export const MACHINE_STATUS = {
   revoked: { label: "Revoked", tone: "off", icon: "⊘" },
 };
 
-/** The VM in words: "running · 2 CPU 2 GiB · up 14 min", "stopped", or "no VM (Docker host)". */
+/** Keep in step with `INSTANCE_TYPES` in src/core/cloudflare.mjs. The dashboard does not import the Worker modules. */
+export const CLOUDFLARE_INSTANCE_TYPES = ["lite", "basic", "standard-1", "standard-2", "standard-3", "standard-4"];
+
+export function isCloudflareExecutor(machine) {
+  return machine?.labels?.runtime === "cloudflare-container";
+}
+
+/** The VM in words: "running · 2 CPU 2 GiB · up 14 min", "stopped", or "no VM (Docker host)". A Cloudflare executor has no VM. */
 export function vmText(machine, now = Date.now()) {
+  if (isCloudflareExecutor(machine)) {
+    const seconds = machine.facts?.containerSeconds30d;
+    const usd = machine.facts?.estimatedUsd30d;
+    const parts = ["Cloudflare Container"];
+    if (typeof seconds === "number") parts.push(`${seconds} container-seconds / 30d`);
+    if (typeof usd === "number") parts.push(`~$${usd < 0.01 ? usd.toFixed(4) : usd.toFixed(2)} before allotment`);
+    return parts.join(" · ");
+  }
   const vm = machine?.vm;
   if (!vm?.state) return "No VM: Docker on the host";
   const parts = [vm.state];
@@ -490,12 +505,12 @@ export function pinnedImage(image, digest) {
 // ---------- Install commands (agent/README.md, "Install by hand")
 
 /**
- * The copy-paste commands that install the agent on a Mac or a Linux box and
- * enrol it with a join token, in three steps each: install, enrol, start the
- * service. The token is never in them: the enrol step (one line, pasted on
- * its own so the prompt does not swallow the next command) asks for it
- * without echo and hands it to the agent on stdin, so it is in no command
- * line and no shell history.
+ * The copy-paste commands that install the agent on a Mac, a Linux box with
+ * systemd, or a Linux box with no Docker daemon, and enrol it with a join
+ * token, in three steps each: install, enrol, start. The token is never in
+ * them: the enrol step (one line, pasted on its own so the prompt does not
+ * swallow the next command) asks for it without echo and hands it to the
+ * agent on stdin, so it is in no command line and no shell history.
  */
 export function installCommands(server, { allowImages = "ghcr.io/sprintengine/*" } = {}) {
   const url = server || "<hc-core URL>";
@@ -541,6 +556,26 @@ export function installCommands(server, { allowImages = "ghcr.io/sprintengine/*"
         "cd ~/home-compute && sudo cp agent/service/home-compute-agent.service agent/service/home-compute.slice /etc/systemd/system/",
         'sudo sed -i "s/@MEMORY_MAX@/6G/" /etc/systemd/system/home-compute.slice   # the most the jobs may use together',
         "sudo systemctl daemon-reload && sudo systemctl enable --now home-compute-agent",
+      ].join("\n") },
+    ],
+    linuxNodocker: [
+      { title: "Install", text: [
+        "# Needs bubblewrap, ca-certificates, git, sudo and Node 22+ for every user (not through nvm). No Docker daemon and no systemd.",
+        "git clone https://github.com/sprintengine/home-compute.git ~/home-compute",
+        "cd ~/home-compute && npm ci && npm run build:agent",
+        "sudo install -d /opt/home-compute/agent/current /opt/home-compute/node/bin",
+        "sudo install -m 0644 agent/dist/home-compute-agent.mjs /opt/home-compute/agent/current/",
+        "sudo install -m 0755 agent/service/home-compute-agent-foreground.sh /opt/home-compute/agent/current/",
+        'sudo ln -sf "$(command -v node)" /opt/home-compute/node/bin/node',
+        "sudo useradd --system --home-dir /var/lib/home-compute --shell /usr/sbin/nologin hcagent",
+        "sudo install -d -m 0700 -o hcagent -g hcagent /var/lib/home-compute",
+      ].join("\n") },
+      { title: "Enrol: paste this line on its own, then the token when asked", text:
+        `${ask} sudo -u hcagent ${linuxAgent} enrol --state-dir /var/lib/home-compute --server ${url} --join-token-stdin --runtime process --allow-images '${allowImages}'; unset HC_JOIN_TOKEN` },
+      { title: "Check, then run in the foreground", text: [
+        `sudo -u hcagent ${linuxAgent} doctor --state-dir /var/lib/home-compute`,
+        "# Foreground, for tini or a shell: exit 0 stops; any other exit restarts after 5s.",
+        "sudo -u hcagent /opt/home-compute/agent/current/home-compute-agent-foreground.sh",
       ].join("\n") },
     ],
   };

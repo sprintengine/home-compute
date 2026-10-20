@@ -1,8 +1,9 @@
 // The container runtime the agent drives (§4.3 of
 // docs/hosted-control-plane.md): DockerCliRuntime (Docker Engine, Docker
-// Desktop), ColimaRuntime (Docker in a Colima VM it starts, sizes and stops)
+// Desktop), ColimaRuntime (Docker in a Colima VM it starts, sizes and stops),
+// ProcessRuntime (an OCI image unpacked and run as a process, with no daemon)
 // and FakeRuntime (scripted containers, for tests and for trying the agent
-// without Docker) implement one interface:
+// without a runtime) implement one interface:
 //
 //   interface ContainerRuntime {
 //     ensureReady({ cpus, memoryMiB }) -> { bootMs }       // Colima: start/resize; Docker: ping
@@ -44,6 +45,7 @@
 import { ColimaRuntime } from "./colima.mjs";
 import { DockerCliRuntime } from "./docker-cli.mjs";
 import { FakeRuntime } from "./fake.mjs";
+import { ProcessRuntime } from "./process-runtime.mjs";
 
 export const RUNTIME_METHODS = ["ensureReady", "idle", "stop", "hasImage", "pull", "run", "adopt", "facts"];
 
@@ -76,5 +78,13 @@ export function createRuntime(config, { clock, state = null, log = () => {}, env
       maxRuns: config.caps?.maxRuns ?? 2, startTimeoutSeconds: colima.startTimeoutSeconds ?? 600, mountHome: Boolean(colima.mountHome),
     });
   }
-  throw new Error(`Unknown runtime ${config.runtime}: use docker, colima or fake`);
+  if (config.runtime === "process") {
+    const proc = config.process ?? {};
+    return new ProcessRuntime({
+      state, clock, log, env, cacheDir: proc.cacheDir ?? null, sandbox: proc.sandbox ?? "auto",
+      bwrap: proc.bwrap ?? "bwrap", proot: proc.proot ?? "proot", unshare: proc.unshare ?? "unshare",
+      keepImages: proc.keepImages ?? 3, selfTestImage: proc.selfTestImage, selfTestArgs: proc.selfTestArgs,
+    });
+  }
+  throw new Error(`Unknown runtime ${config.runtime}: use docker, colima, process or fake`);
 }

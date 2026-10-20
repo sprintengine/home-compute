@@ -3,6 +3,7 @@
 // a base URL and auth change (§1, "What is reused"). Hosted fields (`phase`,
 // `machine`, `revision`…) are additions; `nodes` aliases `machines`.
 
+import { targetsCloudflare } from "../../src/core/cloudflare.mjs";
 import { summarizeRun } from "../../src/core/history.mjs";
 import { claimBlockers, labelsMatch, machineAvailable, secretsRefused, unhealthyReason } from "../../src/core/placement.mjs";
 import { OFFLINE_MS } from "../../src/core/protocol.mjs";
@@ -181,6 +182,7 @@ export function waitingReason(job, run, machines, now, { globalPause, secrets = 
   }
   const matching = labelled.filter((machine) => !secretsRefused(job, machine, secrets).length);
   if (!matching.length) return `${waited}: no machine may receive ${secretsRefused(job, labelled[0], secrets).join(", ")} (the secrets' allowed labels)`;
+  if (targetsCloudflare(job)) return cloudflareWait(waited, matching[0], now);
   const preferred = job.placement?.preferMachines ?? [];
   const available = matching.filter((machine) => machineAvailable(machine, now));
   if (preferred.length && run.preferred_until && now < run.preferred_until) {
@@ -189,6 +191,14 @@ export function waitingReason(job, run, machines, now, { globalPause, secrets = 
   }
   if (!available.length) return `${waited}: no machine online`;
   return `${waited}: no machine has ${job.resources.cpus} CPU and ${job.resources.memoryMiB} MiB free`;
+}
+
+function cloudflareWait(waited, machine, now) {
+  if (machine.drain || machine.health?.localDrain) return `${waited}: cloudflare is drained`;
+  if (!machineAvailable(machine, now)) return `${waited}: cloudflare has not checked in`;
+  const limit = machine.capacity?.maxRuns;
+  if (typeof limit === "number" && (machine.running ?? 0) >= limit) return `${waited}: cloudflare concurrency is full (${limit})`;
+  return `${waited}: cloudflare has not started it yet`;
 }
 
 /**
@@ -204,6 +214,14 @@ export function expectedMachine(job, machines, now, secrets = new Map()) {
   if (!matching.length) {
     const labels = Object.entries(required).map(([key, value]) => `${key}=${value}`).join(", ");
     return { machine: null, note: labels ? `no machine has labels ${labels}` : "no machine enrolled" };
+  }
+  if (targetsCloudflare(job)) {
+    const executor = matching[0];
+    if (executor.drain || executor.health?.localDrain) return { machine: executor.name, note: "drained" };
+    if (!machineAvailable(executor, now)) return { machine: null, note: "cloudflare has not checked in" };
+    const limit = executor.capacity?.maxRuns;
+    if (typeof limit === "number" && (executor.running ?? 0) >= limit) return { machine: executor.name, note: "concurrency is full" };
+    return { machine: executor.name };
   }
   const preferred = job.placement?.preferMachines ?? [];
   const available = matching.filter((machine) => machineAvailable(machine, now));
@@ -282,7 +300,11 @@ export async function buildSnapshot(db, now) {
     else entry.active = row;
     openByJob.set(row.job_id, entry);
   }
-  const machineObjects = machines.results.map(machineFromRow);
+  const runningByMachine = new Map();
+  for (const row of open.results) {
+    if (row.machine_id && row.state !== "due") runningByMachine.set(row.machine_id, (runningByMachine.get(row.machine_id) ?? 0) + 1);
+  }
+  const machineObjects = machines.results.map((row) => ({ ...machineFromRow(row), running: runningByMachine.get(row.id) ?? 0 }));
   const names = new Map(machineObjects.map((machine) => [machine.id, machine.name]));
   const view = (row) => clientRun(row, names);
   const recent = new Map();
@@ -376,7 +398,7 @@ export async function buildSnapshot(db, now) {
       status: "online",
       kind: "hosted",
       pollEvery: "60s",
-      features: ["history", "logs", "timetable", "machines", "import", "audit", "changes", "settings", "job-parts", "machine-runs", "secrets", "alerts"],
+      features: ["history", "logs", "timetable", "machines", "import", "audit", "changes", "settings", "job-parts", "machine-runs", "secrets", "alerts", "containers"],
       globalPause,
       // The cron's heartbeat: stale means slots are not being created (the dashboard says so on every page).
       cron: alerts.cron,

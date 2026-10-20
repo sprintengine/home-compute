@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import {
-  alertBanners, attentionItems, bothClocks, installCommands, localScheduleText, memoryHint, nextRuns, parseArgs, parseLabels, parseRoute, peakMiB, phaseSteps,
+  alertBanners, attentionItems, bothClocks, installCommands, isCloudflareExecutor, localScheduleText, memoryHint, nextRuns, parseArgs, parseLabels, parseRoute, peakMiB, phaseSteps, vmText,
   pinnedImage, runningNow, scheduleLine, scheduleText, slotsByHour, sparkBars, sparkSummary, timetableModel, vmUptime, zoneOffsetMinutes,
 } from "../dashboard/lib.js";
 
@@ -237,7 +237,7 @@ test("forms: labels, extra arguments and pinning a tag to its digest", () => {
 
 test("install commands never carry the token and enrol from stdin, one step on its own", () => {
   const commands = installCommands("https://hc-core.example.workers.dev");
-  for (const os of ["macos", "linux"]) {
+  for (const os of ["macos", "linux", "linuxNodocker"]) {
     const [install, enrol, service] = commands[os];
     assert.doesNotMatch(install.text + service.text, /hcj_|join-token/);
     assert.equal(enrol.text.split("\n").length, 1, "the enrol step is one line, so its prompt reads the token and nothing else");
@@ -249,13 +249,16 @@ test("install commands never carry the token and enrol from stdin, one step on i
   assert.match(commands.macos[2].text, /launchctl bootstrap gui\/\$\(id -u\)/);
   assert.match(commands.linux[1].text, /sudo -u hcagent .* --state-dir \/etc\/home-compute/);
   assert.match(commands.linux[2].text, /systemctl enable --now home-compute-agent/);
+  assert.match(commands.linuxNodocker[1].text, /--runtime process/);
+  assert.match(commands.linuxNodocker[1].text, /--state-dir \/var\/lib\/home-compute/);
+  assert.match(commands.linuxNodocker[2].text, /home-compute-agent-foreground.sh/);
   assert.match(installCommands(null).linux[1].text, /--server <hc-core URL>/);
 });
 
 test("agent/README.md's install by hand is what the dashboard shows", async () => {
   const readme = await readFile(path.resolve(import.meta.dirname, "../agent/README.md"), "utf8");
   const commands = installCommands("https://hc-core.<account>.workers.dev");
-  for (const step of [...commands.macos, ...commands.linux]) {
+  for (const step of [...commands.macos, ...commands.linux, ...commands.linuxNodocker]) {
     const indented = step.text.split("\n").map((line) => `   ${line}`).join("\n");
     assert.ok(readme.includes(indented), `the README has: ${step.title}`);
   }
@@ -295,6 +298,9 @@ test("the alert strip: a stopped cron first, then failing email and open alerts,
   assert.equal(items[1].detail, "since 1 h ago · emailed");
   assert.equal(items[2].href, "#/machines");
   assert.equal(items[4].href, "#/job/tides");
+  assert.equal(vmText({ labels: { runtime: "cloudflare-container" }, facts: { containerSeconds30d: 1200, estimatedUsd30d: 0.009336 } }), "Cloudflare Container · 1200 container-seconds / 30d · ~$0.0093 before allotment");
+  assert.equal(isCloudflareExecutor({ labels: { runtime: "docker" } }), false);
+  assert.equal(vmText({ vm: null }), "No VM: Docker on the host");
   assert.deepEqual(alertBanners({ controller: { kind: "local" }, alerts: snapshot.alerts }, now), []);
   assert.deepEqual(alertBanners({ controller: { kind: "hosted", cron: { stale: false } }, alerts: { open: [], email: { ok: true } } }, now), []);
 });

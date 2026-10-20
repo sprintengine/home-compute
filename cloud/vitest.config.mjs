@@ -27,6 +27,8 @@ export default defineConfig({
           VAULT_PUBLIC_KEY,
           VAULT_PRIVATE_KEY,
         },
+        // hc-core is not running beside the tests: its Dispatcher answers nothing, and the nudge after Run now is best effort.
+        serviceBindings: { HC_CORE: () => new Response(null, { status: 204 }) },
       },
     }),
   ],

@@ -2,3 +2,5 @@
 .dev.vars
 dist/
 .admin/
+wrangler.core.test-*.jsonc
+wrangler.web.test-*.jsonc

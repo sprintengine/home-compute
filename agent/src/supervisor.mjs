@@ -251,6 +251,12 @@ export class RunSupervisor {
   async #supervise() {
     const { handle } = this;
     const signal = this.exit.signal;
+    // The first interval has not elapsed yet. A short job, or a slow state write before this starts, would otherwise finish with no sample at all.
+    try {
+      this.#sample(await handle.stats());
+    } catch {
+      // Already gone. Later reads record whatever is still there.
+    }
     const pump = (async () => {
       try {
         for await (const line of handle.logs) {

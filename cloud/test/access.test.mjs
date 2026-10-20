@@ -82,6 +82,18 @@ describe("Access JWT validation", () => {
   it("refuses everything when Access is not configured", async () => {
     await expect(verifyAccessJwt(await mintJwt(userClaims(OWNER)), accessSettings({}))).rejects.toThrow(/not configured/);
   });
+
+  it("strips any URL scheme and trailing slashes from the team domain", () => {
+    const host = "team.cloudflareaccess.com";
+    for (const team of [host, `https://${host}`, `http://${host}/`, `HTTPS://${host}//`]) {
+      expect(accessSettings({ ACCESS_TEAM_DOMAIN: team, ACCESS_AUD: " aud-tag " })).toEqual({
+        team: host,
+        audience: "aud-tag",
+        issuer: `https://${host}`,
+        certsUrl: `https://${host}/cdn-cgi/access/certs`,
+      });
+    }
+  });
 });
 
 describe("hc-web authentication and roles", () => {
@@ -203,7 +215,7 @@ describe("hc-web authentication and roles", () => {
     await call("/v1/settings", { method: "PATCH", body: { roles: { "second@example.com": "admin" } } });
     const bare = { ...env, BOOTSTRAP_ADMINS: "" };
     const last = await call("/v1/settings", {
-      method: "PATCH", identity: "second@example.com", env: bare, body: { roles: { "viewer@example.com": "viewer" } },
+      method: "PATCH", identity: "second@example.com", environment: bare, body: { roles: { "viewer@example.com": "viewer" } },
     });
     expect(last.status).toBe(400);
     expect(last.body.error).toBe("At least one admin must remain");

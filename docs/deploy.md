@@ -21,7 +21,7 @@ export HC_WEB=https://hc-web.<subdomain>.workers.dev     # the dashboard and /v1
 | --- | --- | --- |
 | D1 `home-compute` | Western Europe (`--location weur`), migrations `0001`–`0006` | `database_id` in both `cloud/wrangler.*.jsonc` |
 | Worker `hc-core` | Agent API, `* * * * *` cron (slots, leases, timeouts, retention, alerts), `/health`, `/health/cron` | `cloud/wrangler.core.jsonc`; secrets `VAULT_PRIVATE_KEY`, `ALERT_EMAIL_TO`, `ALERT_EMAIL_FROM`, `DASHBOARD_URL`; binding `ALERT_EMAIL` (`send_email`) |
-| Worker `hc-web` | Dashboard (static assets) and `/v1`; validates the Access JWT itself and refuses everything until `ACCESS_TEAM_DOMAIN`/`ACCESS_AUD` are set | `cloud/wrangler.web.jsonc`; secrets `CSRF_KEY`, `BOOTSTRAP_ADMINS`, `CORE_URL`, `VAULT_PUBLIC_KEY` |
+| Worker `hc-web` | Dashboard (static assets) and `/v1`; validates the Access JWT itself and refuses everything until `ACCESS_TEAM_DOMAIN`/`ACCESS_AUD` are set | `cloud/wrangler.web.jsonc`; secrets `CSRF_KEY`, `BOOTSTRAP_ADMINS`, `CORE_URL`, `VAULT_PUBLIC_KEY`, `ACCESS_TEAM_DOMAIN`, `ACCESS_AUD` |
 | Email Routing | Alerts go from an address on a zone with Email Routing on (`sprintengine.ai`) to the owner's verified address | Cloudflare › Email › Email Routing › Destination addresses |
 | Dead-man check | `.github/workflows/deadman.yml` every 10 minutes (from `main`) | repository variables `HC_CORE_URL`, `HC_WEB_URL` |
 | Mac mini agent | LaunchAgent `dev.homecompute.agent`, Colima profile `home-compute` (cap 2 CPU / 3 GiB, started on demand) | `~/Library/Application Support/home-compute/config.json` |
@@ -60,6 +60,15 @@ of the last 7 days (`npx wrangler d1 time-travel restore home-compute
 4. hc-core's `ALERT_EMAIL_TO` (a verified Email Routing destination), `ALERT_EMAIL_FROM` (an address on a zone with Email Routing on) and `DASHBOARD_URL`; hc-web's `CSRF_KEY` (48 random bytes), `BOOTSTRAP_ADMINS` (the owner's email) and `CORE_URL`.
 5. Deploy both Workers, then import (§4) and enrol the agent (§6).
 
+## 2a. Cloudflare Containers (optional, one job at a time)
+
+Not part of the deploy above. Containers need the Workers Paid plan, an image
+in Cloudflare's registry (`cloud/scripts/set-container-image.sh`), and a job
+whose placement is `runtime=cloudflare-container`. How a run goes, the sizes,
+the cost and the checklist are [cloudflare-containers.md](cloudflare-containers.md).
+Drain the machine named `cloudflare` to stop new container runs. Do not add an
+R2 binding; jobs keep using S3 keys as vault secrets.
+
 ## 3. Signing in: Cloudflare Access (owner)
 
 `hc-web` refuses every `/v1` request until Access is set up (the dashboard's
@@ -73,10 +82,21 @@ owner's, in the Cloudflare dashboard:
    Enable Cloudflare Access.** Then *Manage Cloudflare Access*: keep the
    policy to the owner's email only (one-time PIN, Google or GitHub as login
    methods), and copy the application's **AUD tag**.
-3. Put the team domain and the AUD tag in `cloud/wrangler.web.jsonc`
-   (`ACCESS_TEAM_DOMAIN`, `ACCESS_AUD`) and `npx wrangler deploy -c
-   wrangler.web.jsonc`. `BOOTSTRAP_ADMINS` (a secret) already makes the owner
-   an admin.
+3. Set the team domain and the AUD tag as Worker secrets, from `cloud/`.
+   They are the owner's own, so they stay out of `wrangler.web.jsonc`. A
+   plain var of the same name cannot exist: `wrangler deploy` replaces vars
+   from that file, while secrets survive it.
+
+   ```sh
+   npx wrangler secret put ACCESS_TEAM_DOMAIN -c wrangler.web.jsonc
+   npx wrangler secret put ACCESS_AUD -c wrangler.web.jsonc
+   npx wrangler deploy -c wrangler.web.jsonc
+   ```
+
+   `ACCESS_TEAM_DOMAIN` is the team hostname (`<team>.cloudflareaccess.com`).
+   A pasted URL is accepted: any scheme and trailing slashes are stripped,
+   and the issuer is `https://<host>`. `ACCESS_AUD` is the application's AUD
+   tag. `BOOTSTRAP_ADMINS` (already a secret) makes the owner an admin.
 4. For the CLI and, later, the menu bar app: **Access › Service auth ›
    Create service token**, add a *Service Auth* rule for it to the
    application's policy, and give it a role in the dashboard. Open
