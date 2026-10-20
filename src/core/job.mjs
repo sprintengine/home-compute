@@ -2,6 +2,8 @@
 // applied, and the hosted control plane's job shape. Pure: no `node:` imports,
 // so this runs in a Worker, the agent and the CLI alike.
 
+import { INSTANCE_TYPES } from "./cloudflare.mjs";
+
 const DURATION = /^(\d+)(s|m|h|d)$/;
 export const JOB_ID = /^[a-z0-9][a-z0-9-]{0,62}$/;
 export const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
@@ -194,11 +196,19 @@ function normaliseResources(resources) {
   if (typeof cpus !== "number" || !Number.isFinite(cpus) || cpus <= 0 || cpus > 64) {
     throw new Error("resources.cpus must be a number above 0 and at most 64");
   }
-  return {
+  const result = {
     cpus,
     memoryMiB: wholeNumber(value.memoryMiB ?? 2048, "resources.memoryMiB", { minimum: 16, maximum: 1024 * 1024 }),
     diskMiB: wholeNumber(value.diskMiB ?? 2048, "resources.diskMiB", { minimum: 1, maximum: 16 * 1024 * 1024 }),
   };
+  // Absent unless set, so a job that never named an instance type stays byte-for-byte the same.
+  if (value.instanceType !== undefined && value.instanceType !== null) {
+    if (typeof value.instanceType !== "string" || !INSTANCE_TYPES[value.instanceType]) {
+      throw new Error(`resources.instanceType must be one of ${Object.keys(INSTANCE_TYPES).join(", ")}`);
+    }
+    result.instanceType = value.instanceType;
+  }
+  return result;
 }
 
 function normaliseTimeouts(timeouts) {

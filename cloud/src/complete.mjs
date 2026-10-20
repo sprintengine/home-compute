@@ -28,6 +28,25 @@ function parse(text, fallback) {
   }
 }
 
+/**
+ * Report metrics, plus the container fields a Cloudflare run stored when it
+ * was claimed. An agent run with no reports still stores nothing. A container
+ * run keeps its instance type and gains `containerSeconds` from its start.
+ */
+function mergedMetrics(run, reports, record, startedAt, now) {
+  const prior = parse(run.metrics_json, {}) ?? {};
+  const kept = {};
+  for (const key of ["instanceType", "vcpu", "memoryMiB", "diskMiB", "containerSeconds"]) {
+    if (prior[key] !== undefined) kept[key] = prior[key];
+  }
+  const extra = record.container && typeof record.container === "object" && !Array.isArray(record.container) ? record.container : {};
+  const merged = { ...kept, ...(reports.length ? reportMetrics(reports) : {}), ...extra };
+  if (merged.instanceType && (merged.containerSeconds === undefined || merged.containerSeconds === null) && typeof startedAt === "number") {
+    merged.containerSeconds = Math.max(0, Math.round((now - startedAt) / 1000));
+  }
+  return Object.keys(merged).length ? JSON.stringify(merged) : null;
+}
+
 function larger(a, b) {
   const values = [a, b].filter((value) => typeof value === "number");
   return values.length ? Math.max(...values) : null;
@@ -69,7 +88,7 @@ function settle(db, run, job, published, record, now) {
     lease_expires_at: null,
     recovered: next.recovered ? 1 : 0,
     reports_json: reports.length ? JSON.stringify(reports) : null,
-    metrics_json: reports.length ? JSON.stringify(reportMetrics(reports)) : null,
+    metrics_json: mergedMetrics(run, reports, record, startedAt, now),
     published_json: job?.report?.trackEvent ? JSON.stringify(publishedEntries(reports, job.report, run.job_id)) : null,
     peak_memory_bytes: larger(run.peak_memory_bytes, stats.peakMemoryBytes),
     memory_limit_bytes: stats.memoryLimitBytes ?? run.memory_limit_bytes,

@@ -243,6 +243,7 @@ describe("overview", () => {
     const initial = await call("/v1/settings");
     expect(initial.body).toEqual({
       globalPause: false, retention: expect.objectContaining({ runDays: 180, keepRunsPerJob: 50 }), roles: {}, desiredAgentVersion: null,
+      cloudflare: { maxConcurrent: 1, maxRunSeconds: 1200, labels: {} },
     });
     const changed = await call("/v1/settings", { method: "PATCH", body: { retention: { runDays: 90 }, globalPause: true } });
     expect(changed.body).toMatchObject({ globalPause: true, retention: { runDays: 90, skippedDays: 14 }, changed: ["retention", "globalPause"] });

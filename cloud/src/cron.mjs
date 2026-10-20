@@ -4,14 +4,13 @@
 // a second cron in the same minute, or a sync materialising lazily, finds
 // the work done.
 
+import { TIMEOUT_GRACE_MS } from "../../src/core/cloudflare.mjs";
 import { newId } from "../../src/core/ids.mjs";
 import { preferredUntil } from "../../src/core/placement.mjs";
 import { lostRetry } from "../../src/core/run.mjs";
 import { materialise } from "../../src/core/schedule.mjs";
 import { alertMinute } from "./alerts.mjs";
 import { ACTIVE_SQL, NON_TERMINAL_SQL } from "./db.mjs";
-
-const TIMEOUT_GRACE_MS = 300_000;
 const RETENTION_MINUTE = 37;
 const RETENTION_BATCH = 500;
 const DAY = 86_400_000;
@@ -229,6 +228,17 @@ export async function minute(env, now, { alerts = {} } = {}) {
   summary.lost = await expireLeases(db, now);
   summary.retried = await retryLostRuns(db, now);
   summary.timedOut = await timeOutRuns(db, now);
+  // After leases and timeouts, so a container run uses the same lost/timeout
+  // rules as a machine. A failure here must not skip alerts. The import is
+  // dynamic so this module and the container starter do not load each other
+  // while they are still initialising.
+  try {
+    const { dispatchCloudflare } = await import("./containers.mjs");
+    summary.containers = await dispatchCloudflare(env, now);
+  } catch (error) {
+    console.error(JSON.stringify({ event: "containers_error", error: String(error?.message ?? error) }));
+    summary.containers = { error: String(error?.message ?? error) };
+  }
   if (new Date(now).getUTCMinutes() === RETENTION_MINUTE) {
     const settings = await db.prepare("SELECT value_json FROM settings WHERE key = 'retention'").first();
     summary.retention = await applyRetention(db, now, parse(settings?.value_json, {}) ?? {});

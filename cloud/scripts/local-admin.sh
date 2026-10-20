@@ -22,6 +22,9 @@ const fs = require("fs");
 const text = fs.readFileSync("wrangler.web.jsonc", "utf8").replace(/^\s*\/\/.*$/gm, "");
 const config = JSON.parse(text);
 config.main = "../src/hc-web.mjs";
+// Its own name: wrangler reaches the remote database through a proxy on the Worker workers.dev
+// host, and the hc-web host is behind Access, which a local session has no token for.
+config.name = `${config.name}-local-admin`;
 config.assets.directory = "../../dashboard";
 config.d1_databases = config.d1_databases.map((database) => ({ ...database, migrations_dir: "../migrations", remote: true }));
 config.$schema = undefined;

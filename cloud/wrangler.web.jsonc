@@ -19,7 +19,10 @@
       "database_id": "4733103a-34c8-4bfe-b81b-136c0e729713",
       "migrations_dir": "migrations"
     }
-  ]
+  ],
+  // hc-core's Dispatcher entrypoint (not a public route): Run now, Cancel and Retry on a
+  // Cloudflare job start or stop its container at once rather than at the next cron minute.
+  "services": [{ "binding": "HC_CORE", "service": "hc-core", "entrypoint": "Dispatcher" }]
   // Secrets (wrangler secret put NAME -c wrangler.web.jsonc; locally .dev.vars), kept out of
   // this file because they are either secret or the owner's own. A plain var of the same
   // name cannot exist: wrangler deploy replaces vars from this file, and secrets survive it.

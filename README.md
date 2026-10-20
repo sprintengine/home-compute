@@ -206,6 +206,12 @@ status`, `history` and `watch` for a terminal. The Mac's menu bar app
 ([macos/](macos/README.md)) has an agent mode over it, and
 [tray/](tray/README.md) is the same menu as a tray app for Windows and Linux.
 
+A job can also target a Cloudflare Container instead of a machine
+(`placement.requireLabels.runtime = cloudflare-container`). That path, its
+cost and the steps to turn it on for one job are in
+[docs/cloudflare-containers.md](docs/cloudflare-containers.md). It is not
+enabled by a deploy on its own.
+
 ## Licence
 
 Home Compute is licensed under Apache License 2.0. Bacalhau is not copied or

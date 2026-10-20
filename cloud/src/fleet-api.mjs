@@ -3,6 +3,7 @@
 // rotation for admins) and revocation. Each change commits with its audit
 // row and bumps `machines_version` so dashboards notice.
 
+import { CLOUDFLARE_MACHINE_ID, CLOUDFLARE_RUNTIME } from "../../src/core/cloudflare.mjs";
 import { normaliseLabels } from "../../src/core/job.mjs";
 import { allows } from "./access.mjs";
 import { auditStatement, bumpMachinesVersion, machineFromRow } from "./db.mjs";
@@ -129,6 +130,12 @@ export async function patchMachine({ db, request, params, identity, role, ip, no
   }
   const row = await requireMachine(db, params.id);
   if (row.revoked_at !== null) throw new HttpError(409, `${row.name} is revoked`);
+  if (row.id === CLOUDFLARE_MACHINE_ID && ["name", "labels", "capacity", "capabilities", "rotateCredential"].some((field) => body[field] !== undefined)) {
+    throw new HttpError(400, "The cloudflare executor only accepts drain");
+  }
+  if (body.labels?.runtime === CLOUDFLARE_RUNTIME) {
+    throw new HttpError(400, "runtime=cloudflare-container is reserved for the Cloudflare Containers executor");
+  }
   const current = machineFromRow(row);
   const next = {};
   if (body.drain !== undefined) {
