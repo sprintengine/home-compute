@@ -15,6 +15,7 @@ import { JOB_LABEL, MAX_ERROR_DETAIL, RUN_LABEL } from "../../src/core/protocol.
 import { runOutcome } from "../../src/core/reports.mjs";
 import { LogCapture } from "./capture.mjs";
 import { fitRecord } from "./fit.mjs";
+import { historyEntry } from "./history.mjs";
 import { specRefusal } from "./policy.mjs";
 
 const MIB = 1048576;
@@ -43,6 +44,8 @@ export class RunSupervisor {
     Object.assign(this, { runtime, state, outbox, clock, config, env, log, events });
     this.phase = "claimed";
     this.phaseAt = clock.now();
+    this.claimedAt = this.phaseAt;
+    this.finishedAt = null;
     this.finished = false;
     this.record = null;
     this.cancelRequested = false;
@@ -54,7 +57,7 @@ export class RunSupervisor {
     this.vmWaitMs = 0;
     this.pullMs = 0;
     this.stats = {
-      peakMemoryBytes: null, memoryLimitBytes: (this.spec.resources?.memoryMiB ?? 0) * MIB || null,
+      memoryBytes: null, peakMemoryBytes: null, memoryLimitBytes: (this.spec.resources?.memoryMiB ?? 0) * MIB || null,
       cpuPct: null, peakCpuPct: null, cpuSum: 0, cpuSeconds: null, samples: 0,
     };
     this.exit = new AbortController();
@@ -114,6 +117,7 @@ export class RunSupervisor {
     this.vmWaitMs = record?.vmWaitMs ?? 0;
     this.pullMs = record?.pullMs ?? 0;
     this.startedWall = record?.startedAt ?? this.clock.now();
+    this.claimedAt = record?.claimedAt ?? this.startedWall;
     this.startedMono = this.clock.monotonic() - Math.max(0, this.clock.now() - this.startedWall);
     this.phase = "running";
     this.done = (async () => {
@@ -226,7 +230,7 @@ export class RunSupervisor {
     const runRecord = {
       // Never a secret value on disk: only the names of the delivered secrets, and no registry credential.
       claim: { run: this.claim.run, spec: { ...plain, secretEnv: {}, secretNames: Object.keys(delivered ?? {}), registryServer: registryAuth?.server ?? null } },
-      containerId: null, startedAt: this.clock.now(), vmWaitMs: this.vmWaitMs, pullMs: this.pullMs, digest: this.digest,
+      containerId: null, claimedAt: this.claimedAt, startedAt: this.clock.now(), vmWaitMs: this.vmWaitMs, pullMs: this.pullMs, digest: this.digest,
     };
     await this.state.writeRunRecord(this.id, runRecord);
     this.handle = await this.runtime.run({
@@ -321,6 +325,7 @@ export class RunSupervisor {
   #sample(sample) {
     if (!sample) return;
     const { stats } = this;
+    if (typeof sample.memoryBytes === "number") stats.memoryBytes = sample.memoryBytes;
     if (typeof sample.memoryBytes === "number") stats.peakMemoryBytes = Math.max(stats.peakMemoryBytes ?? 0, sample.memoryBytes);
     if (typeof sample.memoryLimitBytes === "number" && sample.memoryLimitBytes > 0) stats.memoryLimitBytes = sample.memoryLimitBytes;
     if (typeof sample.cpuPct === "number") {
@@ -335,6 +340,7 @@ export class RunSupervisor {
 
   async #finish({ exitCode = null, oomKilled = false, timedOut = false, cancelled = false, error = null, keepContainer = false }) {
     if (this.aborted || this.finished) return null;
+    this.finishedAt = this.clock.now();
     this.setPhase("reporting");
     const reports = boundedReports(this.capture?.reports ?? []);
     let message = error;
@@ -388,6 +394,38 @@ export class RunSupervisor {
     this.log("run_finished", { run: this.id, job: this.jobId, exitCode, oomKilled, timedOut, cancelled, error: message });
     this.events.finished?.(this);
     return record;
+  }
+
+  /** What the status server shows of a run in hand (§4.7): times, phase and the latest stats; nothing from its spec but the image. */
+  live() {
+    const now = this.clock.now();
+    const running = this.startedWall !== undefined && !this.finished;
+    return {
+      id: this.id,
+      job: this.jobId,
+      attempt: this.claim.run.attempt ?? null,
+      image: this.spec.image ?? null,
+      phase: this.finished ? "reporting" : this.phase,
+      phaseSince: new Date(this.phaseAt).toISOString(),
+      claimedAt: new Date(this.claimedAt).toISOString(),
+      startedAt: this.startedWall === undefined ? null : new Date(this.startedWall).toISOString(),
+      elapsedMs: Math.max(0, (this.finishedAt ?? now) - this.claimedAt),
+      runningMs: running ? Math.max(0, now - this.startedWall) : null,
+      cpuPct: running ? this.stats.cpuPct : null,
+      memoryBytes: running ? this.stats.memoryBytes : null,
+      peakMemoryBytes: this.stats.peakMemoryBytes,
+      memoryLimitBytes: this.stats.memoryLimitBytes,
+      waitingToReport: this.finished,
+    };
+  }
+
+  /** The local history's line for this run (agent/src/history.mjs), once it has finished. */
+  historyEntry() {
+    if (!this.record) return null;
+    return historyEntry({
+      claim: this.claim, record: this.record, claimedAt: this.claimedAt, startedAt: this.startedWall ?? null, finishedAt: this.finishedAt,
+      redact: this.capture ? (text) => this.capture.redact(text) : undefined,
+    });
   }
 
   async #crashed(error) {

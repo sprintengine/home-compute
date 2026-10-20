@@ -8,9 +8,12 @@
 // pre-warm before an upcoming slot, resize while empty, stop when idle.
 
 import { PROTOCOL } from "../../src/core/protocol.mjs";
+import { createRedactor } from "../../src/core/redact.mjs";
 import { systemClock } from "./clock.mjs";
 import { ControlPlaneClient, ControlPlaneError } from "./client.mjs";
 import { fitSyncBody } from "./fit.mjs";
+import { reportedEntry, RunHistory } from "./history.mjs";
+import { logLocation } from "./log-location.mjs";
 import { Outbox } from "./outbox.mjs";
 import { assertRuntime } from "./runtime/runtime.mjs";
 import { RunSupervisor } from "./supervisor.mjs";
@@ -38,6 +41,21 @@ const MAX_ERROR_CHARS = 300;
 const RETRY_COMPLETE = new Set([408, 409]);
 /** Complete answers that mean the server no longer knows the run: nothing left to deliver. */
 const GONE = new Set([404, 410]);
+/** The exit code of a requested restart: not 0, so launchd, systemd and the foreground script all start the agent again. */
+export const RESTART_EXIT_CODE = 75;
+/** Version of the local status API's shape (`statusApi` in GET /v1/status). */
+export const STATUS_API = 1;
+
+/** An http(s) URL, or null: what the status server will pass on as the dashboard's address. */
+export function webUrl(value) {
+  if (typeof value !== "string" || !value) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:" ? url.href : null;
+  } catch {
+    return null;
+  }
+}
 
 function clip(text) {
   if (text === null || text === undefined) return null;
@@ -85,7 +103,18 @@ export class Agent {
     this.clockSkewMs = null;
     this.upcoming = [];
     this.serverConfig = null;
-    this.drain = false;
+    /** The local pause switch (state.json): claim nothing new until resumed, across restarts. */
+    this.paused = false;
+    this.pausedAt = null;
+    /** A drain (not kept): claim nothing new, finish and report what runs, then restart. */
+    this.draining = false;
+    this.drainingSince = null;
+    /** The dashboard's drain for this machine, when hc-core says (null: it did not). */
+    this.serverDrain = null;
+    this.dashboardUrl = webUrl(config.dashboardUrl);
+    this.restartRequested = null;
+    this.startedAt = clock.now();
+    this.history = new RunHistory(state.dir);
     this.revoked = false;
     this.upgradeRequired = false;
     this.runtimeOk = true;
@@ -103,7 +132,10 @@ export class Agent {
   /** Before the first sync: local state, the env file, old logs pruned, containers adopted, the outbox sent. */
   async start() {
     await this.state.ensure();
-    this.drain = Boolean((await this.state.readLocalState()).drain);
+    const local = await this.state.readLocalState();
+    // Before the pause switch had its name it was `drain`; either one pauses.
+    this.paused = Boolean(local.paused ?? local.drain);
+    this.pausedAt = this.paused ? (local.pausedAt ?? null) : null;
     this.env = await this.state.readEnv(this.config);
     await this.state.pruneLogs(this.clock.now()).catch(() => 0);
     await this.adopt();
@@ -128,9 +160,10 @@ export class Agent {
       env: this.env, log: this.log,
       events: {
         phase: () => this.#phaseChanged(),
-        finished: () => {
+        finished: (supervisor) => {
           this.#runsChanged();
-          this.#track(this.flushOutbox());
+          this.#track(this.#remember(supervisor));
+          this.#track(this.flushOutbox().then(() => this.#checkDrained()));
         },
         runtimeError: (error) => {
           // A VM without room beside running containers is not a failed start.
@@ -352,12 +385,12 @@ export class Agent {
     // A result still in the outbox keeps its run's lease alive (it is "reporting") until the server has it.
     for (const id of await this.outbox.ids()) if (!reported.has(id)) entries.push({ entry: { id, phase: "reporting" }, version: null });
     const free = this.free(facts);
-    const claim = !this.drain && !this.revoked && !this.upgradeRequired && !this.killed && this.runtimeOk
+    const claim = !this.paused && !this.draining && !this.revoked && !this.upgradeRequired && !this.killed && this.runtimeOk
       && this.readyFailures < READY_FAILURES_UNHEALTHY && free.runs > 0;
     const body = {
       agentVersion: AGENT_VERSION,
       agentTime: this.clock.now(),
-      machine: { drain: this.drain, vm: facts?.vm ?? { kind: facts?.kind ?? "unknown", state: null }, free, health: this.health() },
+      machine: { drain: this.paused || this.draining, vm: facts?.vm ?? { kind: facts?.kind ?? "unknown", state: null }, free, health: this.health() },
       runs: entries.map(({ entry }) => entry),
       claim,
     };
@@ -386,6 +419,8 @@ export class Agent {
     if (response.rotateCredential?.credential) await this.#rotate(response.rotateCredential.credential);
     this.upcoming = response.upcoming ?? [];
     this.serverConfig = response.config ?? null;
+    this.serverDrain = typeof response.machine?.drain === "boolean" ? response.machine.drain : null;
+    this.dashboardUrl = webUrl(this.config.dashboardUrl) ?? webUrl(response.config?.dashboardUrl);
     this.#stayAwake();
     this.vmWakeup?.abort();
     if (response.claims?.length || response.cancel?.length) {
@@ -450,12 +485,14 @@ export class Agent {
             const { body } = await this.client.complete(id, record);
             await this.outbox.remove(id);
             this.runs.delete(id);
+            this.#track(this.history.append(reportedEntry(id, { at: this.clock.now(), state: body.state ?? null })));
             this.log("run_reported", { run: id, state: body.state, recovered: body.recovered || undefined, duplicate: body.duplicate || undefined });
           } catch (error) {
             if (error instanceof ControlPlaneError && error.kind === "rejected" && !RETRY_COMPLETE.has(error.status)) {
               // The server will never take it as it is. A run it no longer knows needs nothing more; anything
               // else is kept aside in outbox/rejected/ for a person, never just deleted.
               this.log("run_report_rejected", { run: id, status: error.status, error: error.message });
+              this.#track(this.history.append(reportedEntry(id, { at: this.clock.now(), state: "rejected", status: error.status })));
               if (GONE.has(error.status)) await this.outbox.remove(id);
               else await this.outbox.quarantine(id);
               this.runs.delete(id);
@@ -511,6 +548,8 @@ export class Agent {
         }
       }
       if (this.stopped) break;
+      await this.#checkDrained();
+      if (this.stopped) break;
       this.nextSyncAt = this.clock.now() + delay;
       this.wakeup = new AbortController();
       await this.clock.sleep(delay, this.wakeup.signal);
@@ -547,42 +586,144 @@ export class Agent {
     this.vmWakeup?.abort();
   }
 
-  async setDrain(drain) {
-    this.drain = Boolean(drain);
-    await this.state.writeLocalState({ ...(await this.state.readLocalState()), drain: this.drain });
-    this.log(this.drain ? "drain_on" : "drain_off", {});
+  /** A finished run's line in the local history; a failure to write it is logged, never fatal. */
+  async #remember(supervisor) {
+    const entry = supervisor.historyEntry();
+    if (!entry) return;
+    try {
+      await this.history.append(entry);
+    } catch (error) {
+      this.log("history_error", { run: supervisor.id, error: error.message });
+    }
+  }
+
+  /** The local pause switch (§3.5's drain set on the machine): kept in state.json, so a restart stays paused. */
+  async setPaused(paused) {
+    const next = Boolean(paused);
+    const local = await this.state.readLocalState();
+    if (next !== this.paused) this.pausedAt = next ? this.clock.now() : null;
+    this.paused = next;
+    // `drain` too, the key agents before 0.3 read, so going back to one keeps the machine paused.
+    await this.state.writeLocalState({ ...local, paused: this.paused, pausedAt: this.pausedAt, drain: this.paused });
+    this.log(this.paused ? "paused" : "resumed", {});
     this.wake();
+  }
+
+  /** The legacy `POST /drain`: the same switch as pause. */
+  setDrain(drain) {
+    return this.setPaused(drain);
+  }
+
+  /**
+   * Drain: claim nothing new, let the runs in hand finish and their results
+   * reach the control plane, then restart (exit 75, which every service
+   * template starts again). Not kept: the restarted agent claims again unless
+   * it is paused. `false` cancels a drain that has not finished.
+   */
+  async setDraining(draining) {
+    const next = Boolean(draining);
+    if (next !== this.draining) {
+      this.draining = next;
+      this.drainingSince = next ? this.clock.now() : null;
+      this.log(next ? "drain_started" : "drain_cancelled", { runs: this.activeRuns().length });
+    }
+    this.wake();
+    await this.#checkDrained();
+  }
+
+  async #checkDrained() {
+    if (!this.draining || this.restartRequested || this.activeRuns().length) return;
+    if ((await this.outbox.ids()).length) return;
+    this.requestRestart("drained");
+  }
+
+  /**
+   * Ends the service loop so `run` exits with RESTART_EXIT_CODE; the service
+   * manager starts it again. Running containers are left to themselves and
+   * adopted by the next start, as after any service restart.
+   */
+  requestRestart(reason = "requested") {
+    if (this.restartRequested) return;
+    this.restartRequested = { reason, at: this.clock.now() };
+    this.log("restart_requested", { reason, runs: this.activeRuns().length });
+    this.stop();
+  }
+
+  /** Why the next sync will not claim, or [] when it will (if a slot is free). */
+  notClaimingBecause() {
+    const reasons = [];
+    if (this.paused) reasons.push("paused");
+    if (this.draining) reasons.push("draining");
+    if (this.serverDrain) reasons.push("drained-on-dashboard");
+    if (this.revoked) reasons.push("revoked");
+    if (this.upgradeRequired) reasons.push("upgrade-required");
+    if (!this.runtimeOk) reasons.push("runtime-unreachable");
+    if (this.readyFailures >= READY_FAILURES_UNHEALTHY) reasons.push("runtime-failed");
+    if (this.activeRuns().length >= (this.config.caps?.maxRuns ?? DEFAULT_MAX_RUNS)) reasons.push("full");
+    return reasons;
+  }
+
+  /** Strips the credential, local secret values and credential shapes from text the status server passes on. */
+  #scrubber() {
+    const known = [this.credential, ...this.env.values()].filter((value) => typeof value === "string" && value.length >= 4);
+    const redact = createRedactor(known);
+    return (text) => (text === null || text === undefined ? text : redact(String(text)));
   }
 
   /** What the local status server shows (§4.7): read-only, no secrets. */
   async status() {
     const outbox = await this.outbox.ids();
+    const scrub = this.#scrubber();
+    const health = this.health();
+    const now = this.clock.now();
+    const active = this.activeRuns();
+    const notClaiming = this.notClaimingBecause();
+    const memory = process.memoryUsage();
     return {
+      statusApi: STATUS_API,
       agentVersion: AGENT_VERSION,
       protocol: PROTOCOL,
       machineId: this.config.machineId,
       name: this.config.name,
       server: this.config.server,
+      dashboardUrl: this.dashboardUrl,
       connection: this.connection,
-      drain: this.drain,
+      connected: this.connection === "online",
+      drain: this.paused,
+      paused: this.paused,
+      pausedAt: iso(this.pausedAt),
+      draining: this.draining,
+      drainingSince: iso(this.drainingSince),
+      serverDrain: this.serverDrain,
+      claiming: notClaiming.filter((reason) => reason !== "full").length === 0,
+      notClaimingBecause: notClaiming,
       revoked: this.revoked,
       upgradeRequired: this.upgradeRequired,
       lastSyncAt: iso(this.lastSyncAt),
       nextSyncAt: iso(this.nextSyncAt),
-      lastError: this.lastError,
+      lastError: scrub(this.lastError),
       clockSkewMs: this.clockSkewMs,
       ...(Math.abs(this.clockSkewMs ?? 0) > CLOCK_SKEW_WARNING_MS ? { clockSkewWarning: true } : {}),
       runtime: {
-        kind: this.config.runtime, ok: this.runtimeOk, lastError: this.runtimeError, health: this.health(), vm: this.lastFacts?.vm ?? null,
+        kind: this.config.runtime, ok: this.runtimeOk, lastError: scrub(this.runtimeError), health: { ...health, lastError: scrub(health.lastError) },
+        vm: this.lastFacts?.vm ?? null,
         lifecycle: this.vmDecision ? { action: this.vmDecision.action, reason: this.vmDecision.reason, wakeAt: iso(this.vmDecision.wakeAt) } : null,
         awake: this.caffeinate ? this.caffeinate.holding : null,
       },
+      current: active.map((run) => run.live()),
       runs: [...this.runs.values()].map((run) => ({
         id: run.id, job: run.jobId, phase: run.finished ? "reporting" : run.phase, since: iso(run.phaseAt),
         peakMemoryBytes: run.stats.peakMemoryBytes, waitingToReport: run.finished,
       })),
       outbox: outbox.length,
       upcoming: this.upcoming,
+      agent: {
+        pid: process.pid,
+        startedAt: iso(this.startedAt),
+        uptimeSeconds: Math.round((now - this.startedAt) / 1000),
+        rssBytes: memory.rss,
+        ...logLocation(this.config),
+      },
     };
   }
 }

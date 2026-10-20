@@ -679,6 +679,13 @@ redacted like the other secrets and never written to the run record.
   starts without a login. `.wslconfig` caps memory.
 - **Local status**: `127.0.0.1:4787` (read-only, plus `POST /drain`), authenticated by a token in a
   0600 file, for the menu bar app.
+- *As built (agent 0.3):* `GET /v1/status` (connection, why it claims nothing, the runs in hand with
+  elapsed time, CPU and memory), `GET /v1/history` from a local `history.jsonl` (rotated at 512 KB),
+  `POST /v1/pause|resume` (kept in `state.json`), `/v1/drain` (finish, report, then restart) and
+  `/v1/restart` (exit 75, which every service template restarts). It refuses another `Host` and any
+  `Origin`, and redacts the credential and local secrets from errors. hc-core's sync answer carries
+  `config.dashboardUrl` and `machine.drain` for it. Clients: the menu bar app's agent mode
+  (`macos/`), the Windows and Linux tray (`tray/`), and `status`/`history`/`watch` in a terminal.
 - *As built (M2):* one state directory holds the configuration, credential, `env` (local
   secrets), status token, outbox and run records: `~/Library/Application Support/home-compute`
   on macOS; on Linux `/etc/home-compute` for root or when it exists and is writable (the systemd

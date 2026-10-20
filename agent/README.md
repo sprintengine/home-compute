@@ -182,11 +182,21 @@ seconds). The dashboard's commands come from `installCommands()` in
 | --- | --- |
 | `enrol --server URL --join-token-stdin [--name NAME] [--runtime docker\|colima\|process\|fake] [--allow-images 'a/*,b/*'] [--allow-local-images] [--colima-profile NAME] [--reenrol]` | Spends a join token (read from stdin, so it never shows in `ps`; `--join-token TOKEN` works but warns) for this machine's id and credential, and writes the configuration and credential. The name, labels and capabilities come from the token; `--name` (default: the host name) is used only if the token names none. Refuses to replace an existing credential without `--reenrol`. Says so when no image may run yet. The facts include `runtime`, which hc-core stores as the machine label the scheduler matches. |
 | `run` | The service: adopts containers left from before a restart, sends what waits in the outbox, then syncs at the interval `hc-core` sets; with Colima it also runs the VM lifecycle. SIGTERM or SIGINT stops it at once; running containers (and the VM) are left alone and adopted next time. |
-| `status [--json]` | Asks the running agent's local status server: connection, last and next sync, clock skew, drain, runtime, the VM (state, size, measured boot, what the lifecycle waits for), runs, outbox, upcoming slots. |
+| `status [--json]` | Asks the running agent's local status server: connection, last and next sync, clock skew, whether it takes jobs (and why not), runtime, the VM (state, size, measured boot, what the lifecycle waits for), what runs now (elapsed time, CPU, memory), the last 5 runs (✓/✗ and the error), outbox, upcoming slots. `--json` prints `GET /v1/status` with `history` (the last 20 runs) added. When the agent is not running it says so, shows the history file, and exits 1. |
+| `history [--json] [--limit N]` | The newest N (default 20) finished runs, newest first: ✓ or ✗, job, finish time, duration, outcome or error (and a failure's last error lines). From the running agent, else straight from `history.jsonl`. |
+| `watch [--interval S]` | `status`, redrawn every S seconds (default 2) until Ctrl-C; for a terminal on a machine without a desktop (a sandbox, a server over SSH). Not on a terminal, it prints the status again only when it changed. |
+| `pause` / `resume` | Claim nothing new until resumed (running jobs finish), kept across restarts in `state.json`; then take jobs again. The dashboard's machine drain is separate, and either stops claims. |
+| `drain [--cancel]` | Claim nothing new, let the running jobs finish and their results reach the control plane, then restart (exit 75, which the service starts again). Not kept: the restarted agent takes jobs again unless paused. `--cancel` stops a drain that has not finished. |
+| `restart` | Restart now: the service loop ends and the agent exits 75, which launchd (`KeepAlive`), systemd (`Restart=always`) and the foreground script start again. Running jobs carry on and are adopted, as after any service restart. |
 | `doctor [--start-vm]` | Checks the configuration, `allowImages` (it fails while the list is empty), file permissions, credential, the runtime and the control plane. Docker: it answers, and `docker run --rm hello-world` works under a run's restrictions. Colima: the profile's state; a stopped VM is left stopped unless `--start-vm` (and the service is not running), which starts it, checks Docker, records its boot time and stops it again. Process: the sandbox that will be used, whether memory can be a cgroup, and a tiny image run (`docker.io/library/busybox` unless `process.selfTestImage` says otherwise). Warnings (plain sandbox, no cgroup, shared network) are printed and the command still succeeds when the tiny run does. If the service is not running, makes one sync without claiming to prove the credential and measure clock skew. Exits 1 if anything failed. |
 | `version` | The agent version and protocol. |
 
-Every command takes `--state-dir DIR` (or `HC_AGENT_STATE_DIR`).
+Every command takes `--state-dir DIR` (or `HC_AGENT_STATE_DIR`). `status`,
+`history`, `watch`, `pause`, `resume`, `drain` and `restart` talk to the
+running agent's [local status API](#local-status-api); when the state
+directory belongs to another user (the Linux service runs as `hcagent`),
+give them `--token-file` (a copy of its `status-token`, see below) and, if
+`statusPort` is not 4787, `--status-port`.
 
 ## State directory
 
@@ -206,7 +216,8 @@ temporary file, then a rename); `doctor` checks this.
 | `credential` | `hca_<machineId>_<secret>`. `hc-core` keeps only its SHA-256. Replaced by a rotation (§5): the new one is written before it is used. |
 | `env` | Local secrets for `local:<NAME>` references, as `NAME=value` lines. They never leave the machine. |
 | `status-token` | The bearer token of the local status server. |
-| `state.json` | The local drain switch, kept across restarts. |
+| `state.json` | The local pause switch (`paused`, `pausedAt`; also written as `drain`, which agents before 0.3 read), kept across restarts. |
+| `history.jsonl` | The local run history: a line per finished run (job, attempt, image and digest, claimed/started/finished times, outcome, exit code, OOM/timeout/cancel flags, the error and its detail, duration, peak memory, CPU, the model runs it published) and one when the control plane took its result. Never a spec, env value, log line or credential; errors are redacted again as they are written. Past 512 KB it becomes `history.jsonl.1` (replacing the previous one), so about the last 1 MB of runs is kept. |
 | `outbox/<run>.json` | A run's final record, written (and flushed to disk) before it is sent and deleted after a 2xx. A 409 keeps it for later; a run the server no longer knows (404) drops it; any other refusal moves it to `outbox/rejected/` for a person to look at. |
 | `runs/<run>.json` | A started run's claim and start time, for adoption after a restart: the names of its delivered secrets, never their values, and no registry credential. |
 | `runs/<run>.log.gz` | The run's whole redacted log, kept 7 days. |
@@ -226,7 +237,9 @@ temporary file, then a rename); `doctor` checks this.
 | `allowImages` | `[]` | Image patterns this machine runs (`*` matches anything), whatever the control plane says. **Empty runs nothing**: list what you trust, e.g. `["ghcr.io/sprintengine/*"]`. `doctor` fails while it is empty and warns while it is `["*"]`. |
 | `allowLocalImages` | `false` | Whether images without a registry host (`wingfoil-forecast:local`, `alpine`) may run. |
 | `envFile` | `<state>/env` | Where local secrets are read from (relative to the state directory). |
-| `statusPort` | `4787` | The local status server's port on 127.0.0.1 (0 turns it off). |
+| `statusPort` | `4787` | The local status API's port on 127.0.0.1 (0 turns it off). It cannot listen anywhere else. |
+| `dashboardUrl` | `null` | The dashboard (hc-web) the local apps' "Open dashboard" opens. Unset, the agent uses the one hc-core sends (its `DASHBOARD_URL`). |
+| `logFile` | `null` | This agent's own log, for the local apps' "Open log" (also `HC_AGENT_LOG_FILE`). Unset, it is found: stdout when that is a file (the LaunchAgent's `agent.log`), or `journalctl -u home-compute-agent` under systemd. |
 | `stopGraceSeconds` | `30` | How long a stopped container gets before it is killed (timeouts, cancels). |
 | `statsIntervalSeconds` | `3` | How often a running container's stats are sampled. |
 | `pullTimeoutSeconds` | `1200` | A pull taking longer fails the run (§3.6). |
@@ -367,8 +380,10 @@ report. Without one, a container prints one line and exits 0.
   first when records expect containers in it); a run whose container is gone
   is reported failed ("the agent restarted and the container was gone").
   The adopted container's log is replayed from its start and redacted again.
-- **Drain.** `POST /drain` on the status server (or `drain` from the
-  dashboard): finish current work, claim nothing new.
+- **Pause and drain.** `pause` (or `POST /v1/pause`) keeps the machine from
+  claiming, across restarts, until `resume`; the dashboard's drain does the
+  same from the control plane. Either lets running work finish. `drain`
+  finishes what runs, sends its results and then restarts the agent.
 
 ### Secrets after a restart
 
@@ -413,16 +428,55 @@ Templates in [service/](service/):
 
 The installer (M6) writes these; by hand they work as described.
 
-## Local status server
+## Local status API
 
-`http://127.0.0.1:4787`, every request with `Authorization: Bearer <status-token>`:
+The running agent answers on `http://127.0.0.1:<statusPort>` (4787) for the
+menu bar app ([macos/](../macos/README.md)), the tray app
+([tray/](../tray/README.md)) and the commands above. It is **local and
+read-mostly**:
+
+- It listens on 127.0.0.1 only; there is no setting for another address,
+  and `startStatusServer` refuses one.
+- Every request needs `Authorization: Bearer <status-token>`, the 0600 file
+  in the 0700 state directory, so another user of the machine is refused
+  (401) even though the port is local. The token is compared in constant
+  time.
+- A request whose `Host` is not `127.0.0.1:<port>` or `localhost:<port>`
+  (DNS rebinding) is refused with 421, and one with an `Origin` (a web page)
+  with 403, before the token is looked at. A POST needs
+  `content-type: application/json`.
+- Nothing it answers holds a secret: no spec, env value, log line,
+  credential, join token or registry password, and error text has the
+  agent's credential, its local secrets and credential shapes redacted.
+
+| Request | Answer |
+| --- | --- |
+| `GET /v1/status` | `statusApi` (1), the machine, `server`, `dashboardUrl`, `connection` and `connected`, `lastSyncAt`/`nextSyncAt`, `lastError`, clock skew; `paused`/`pausedAt`, `draining`, `serverDrain` (the dashboard's), `claiming` and `notClaimingBecause` (`paused`, `draining`, `drained-on-dashboard`, `revoked`, `upgrade-required`, `runtime-unreachable`, `runtime-failed`, `full`); `runtime` and its VM; `current`, the runs in hand (`job`, `phase`, `claimedAt`, `startedAt`, `elapsedMs`, `runningMs`, `cpuPct`, `memoryBytes`, `peakMemoryBytes`, `memoryLimitBytes`); `outbox`; `upcoming`; `agent` (`pid`, `uptimeSeconds`, `rssBytes`, `logFile` or `logHint`). |
+| `GET /v1/history?limit=N` | `{runs}`: the newest N (default 20, at most 500) from `history.jsonl`, each with `passed` (true ✓, false ✗, null for a cancelled run) and `reported` (`{at, state}` once the control plane has it). |
+| `POST /v1/pause`, `POST /v1/resume` | The pause switch; answers the new status. |
+| `POST /v1/drain` `{"drain": true\|false}` | Start (the default) or cancel a drain. |
+| `POST /v1/restart` | Answers, then restarts (exit 75). |
+| `GET /status`, `POST /drain` `{"drain": bool}` | As before 0.3: the status, and the pause switch. |
 
 ```sh
 TOKEN=$(cat "$HOME/Library/Application Support/home-compute/status-token")
-curl -s -H "authorization: Bearer $TOKEN" http://127.0.0.1:4787/status
-curl -s -X POST -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-  -d '{"drain": true}' http://127.0.0.1:4787/drain
+curl -s -H "authorization: Bearer $TOKEN" http://127.0.0.1:4787/v1/status
+curl -s -H "authorization: Bearer $TOKEN" 'http://127.0.0.1:4787/v1/history?limit=5'
+curl -s -X POST -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' -d '{}' http://127.0.0.1:4787/v1/pause
 ```
+
+**Another user's agent.** On Linux the service runs as `hcagent` and its
+state directory is not readable by the person at the desktop. The token
+never changes once made, so give that person a copy only they can read:
+
+```sh
+mkdir -p -m 0700 ~/.config/home-compute
+(umask 077; sudo cat /etc/home-compute/status-token > ~/.config/home-compute/agent-status-token)
+home-compute-agent status --token-file ~/.config/home-compute/agent-status-token
+```
+
+The tray app looks for that file by default. Delete the state directory's
+`status-token` and restart the agent to make a new one (then copy it again).
 
 ## Tests
 

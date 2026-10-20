@@ -6,13 +6,15 @@ import { realpathSync } from "node:fs";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 import { PROTOCOL } from "../../src/core/protocol.mjs";
-import { Agent, jsonLog } from "./agent.mjs";
+import { Agent, jsonLog, RESTART_EXIT_CODE } from "./agent.mjs";
 import { createCaffeinate } from "./caffeinate.mjs";
 import { ControlPlaneClient } from "./client.mjs";
 import { enrol } from "./enrol.mjs";
 import { runProcessRunner } from "./runtime/process-runner.mjs";
+import { RunHistory } from "./history.mjs";
 import { createRuntime } from "./runtime/runtime.mjs";
-import { defaultStateDir, StateDir } from "./state.mjs";
+import { DEFAULT_STATUS_PORT, defaultStateDir, StateDir } from "./state.mjs";
+import { ago, formatStatus, historyLine } from "./status-format.mjs";
 import { startStatusServer } from "./status-server.mjs";
 import { AGENT_VERSION } from "./version.mjs";
 
@@ -35,14 +37,22 @@ Usage:
                            [--allow-images 'ghcr.io/you/*,…'] [--allow-local-images] [--colima-profile NAME] [--reenrol]
   home-compute-agent run
   home-compute-agent status [--json]
+  home-compute-agent history [--json] [--limit N]
+  home-compute-agent watch [--interval SECONDS]
+  home-compute-agent pause | resume
+  home-compute-agent drain [--cancel]
+  home-compute-agent restart
   home-compute-agent doctor [--start-vm]
   home-compute-agent version
 
 Every command takes --state-dir DIR (or HC_AGENT_STATE_DIR); the default is
 ~/Library/Application Support/home-compute on a Mac and /etc/home-compute
-(root) or ~/.local/state/home-compute on Linux.`;
+(root) or ~/.local/state/home-compute on Linux. status, history, watch,
+pause, resume, drain and restart ask the running agent's local status
+server; --token-file FILE and --status-port PORT point them at it when the
+state directory belongs to another user (a copy of its status-token).`;
 
-const FLAGS = new Set(["join-token-stdin", "reenrol", "json", "help", "allow-local-images", "start-vm"]);
+const FLAGS = new Set(["join-token-stdin", "reenrol", "json", "help", "allow-local-images", "start-vm", "cancel"]);
 
 /** `--name value`, `--name=value` and boolean flags; the first bare word is the command. */
 export function parseArguments(argv) {
@@ -79,24 +89,61 @@ async function loadEnrolled(state) {
   return { config, credential };
 }
 
-async function localStatus(state, config, timeoutMs = 2000) {
-  if (!config?.statusPort) return null;
-  const token = (await state.readText(state.statusTokenPath))?.trim();
-  if (!token) return null;
+/**
+ * Where the running agent's status server is and its token: --status-port
+ * and --token-file when given (a user who cannot read the state directory
+ * keeps a copy of status-token), else config.json's statusPort and the
+ * state directory's status-token.
+ */
+async function localServer(state, config, options = {}) {
+  const port = options["status-port"] !== undefined ? Number(options["status-port"]) : config?.statusPort ?? DEFAULT_STATUS_PORT;
+  if (!Number.isInteger(port) || port <= 0 || port > 65_535) return null;
+  let token = null;
   try {
-    const response = await fetch(`http://127.0.0.1:${config.statusPort}/status`, {
-      headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(timeoutMs),
-    });
-    return response.ok ? await response.json() : null;
+    token = (await state.readText(options["token-file"] ?? state.statusTokenPath))?.trim() || null;
+  } catch {
+    token = null;
+  }
+  return token ? { base: `http://127.0.0.1:${port}`, token } : null;
+}
+
+async function localRequest(server, target, { method = "GET", body, fetch = globalThis.fetch, timeoutMs = 2000 } = {}) {
+  const response = await fetch(`${server.base}${target}`, {
+    method,
+    headers: { authorization: `Bearer ${server.token}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const answer = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`the status server answered ${response.status}: ${answer.error ?? "no reason given"}`);
+  return answer;
+}
+
+async function localStatus(state, config, options = {}, fetch = globalThis.fetch) {
+  const server = await localServer(state, config, options);
+  if (!server) return null;
+  try {
+    return await localRequest(server, "/v1/status", { fetch });
   } catch {
     return null;
   }
 }
 
-function ago(isoTime, now = Date.now()) {
-  if (!isoTime) return "never";
-  const seconds = Math.round((now - Date.parse(isoTime)) / 1000);
-  return seconds >= 0 ? `${seconds} s ago` : `in ${-seconds} s`;
+/** The newest runs: from the running agent, else straight from history.jsonl when this user can read it. */
+async function recentRuns(state, config, options, limit, fetch) {
+  const server = await localServer(state, config, options);
+  if (server) {
+    try {
+      return { runs: (await localRequest(server, `/v1/history?limit=${limit}`, { fetch })).runs, live: true };
+    } catch {
+      // Not running: read the file.
+    }
+  }
+  try {
+    return { runs: await new RunHistory(state.dir).recent(limit), live: false };
+  } catch {
+    return { runs: [], live: false };
+  }
 }
 
 async function commandEnrol(options, io) {
@@ -146,38 +193,118 @@ async function commandRun(options, io) {
   await statusServer?.close();
   // Running containers are left to themselves (the next start adopts them); only their supervision stops.
   agent.detach();
-  jsonLog("stopped", { runs: agent.runs.size });
+  jsonLog("stopped", { runs: agent.runs.size, ...(agent.restartRequested ? { restart: agent.restartRequested.reason, exitCode: RESTART_EXIT_CODE } : {}) });
   io.exitAfter = true;
-  return 0;
+  // Not 0, so the service manager (launchd KeepAlive, systemd Restart=always, the foreground script) starts it again.
+  return agent.restartRequested ? RESTART_EXIT_CODE : 0;
 }
 
 async function commandStatus(options, io) {
   const state = stateFrom(options);
-  const config = await state.loadConfig();
-  if (!config) {
-    io.out(`Not enrolled (no configuration in ${state.dir}).`);
+  const config = await state.loadConfig().catch(() => null);
+  const live = await localStatus(state, config, options, io.fetch);
+  if (!config && !live) {
+    io.out(`Not enrolled (no configuration in ${state.dir}), or not readable by this user; --token-file points at a copy of the agent's status-token.`);
     return 1;
   }
-  const live = await localStatus(state, config);
   if (options.json) {
-    io.out(JSON.stringify(live ?? { running: false, name: config.name, machineId: config.machineId, server: config.server }, null, 2));
+    const history = (await recentRuns(state, config, options, 20, io.fetch)).runs;
+    io.out(JSON.stringify(live ? { running: true, ...live, history } : { running: false, name: config.name, machineId: config.machineId, server: config.server, history },
+      null, 2));
     return live ? 0 : 1;
   }
-  io.out(`${config.name} (${config.machineId}) → ${config.server}`);
   if (!live) {
+    io.out(`${config.name} (${config.machineId}) → ${config.server}`);
     io.out("The agent is not running (its status server did not answer).");
+    const { runs } = await recentRuns(state, config, options, 5, io.fetch);
+    if (runs.length) {
+      io.out("recent:");
+      for (const entry of runs) io.out(`  ${historyLine(entry)}`);
+    }
     return 1;
   }
-  io.out(`connection: ${live.connection}; last sync ${ago(live.lastSyncAt)}; next ${ago(live.nextSyncAt)}; clock skew ${live.clockSkewMs ?? "?"} ms`);
-  io.out(`drain: ${live.drain ? "on" : "off"}; runtime ${live.runtime.kind}: ${live.runtime.ok ? "ok" : `not ok (${live.runtime.lastError})`}`);
-  const vm = live.runtime.vm;
-  if (vm) {
-    const size = vm.state === "running" ? ` ${vm.cpus} CPU ${vm.memoryMiB} MiB` : "";
-    io.out(`vm ${vm.profile ?? vm.kind}: ${vm.state}${size}; boot ${vm.bootSeconds ?? "?"} s${live.runtime.lifecycle ? `; ${live.runtime.lifecycle.reason}` : ""}`);
+  const { runs } = await recentRuns(state, config, options, 5, io.fetch);
+  io.out(formatStatus(live, runs));
+  return 0;
+}
+
+async function commandHistory(options, io) {
+  const state = stateFrom(options);
+  const config = await state.loadConfig().catch(() => null);
+  const limit = options.limit === undefined ? 20 : Number(options.limit);
+  if (!Number.isInteger(limit) || limit < 1) throw new Error("--limit must be a whole number of runs");
+  const { runs } = await recentRuns(state, config, options, limit, io.fetch);
+  if (options.json) {
+    io.out(JSON.stringify({ runs }, null, 2));
+    return 0;
   }
-  if (live.lastError) io.out(`last error: ${live.lastError}`);
-  for (const run of live.runs) io.out(`run ${run.id} ${run.job}: ${run.phase} since ${run.since}${run.waitingToReport ? " (result waiting to send)" : ""}`);
-  io.out(`outbox: ${live.outbox}; upcoming: ${live.upcoming.map((entry) => `${entry.jobId} at ${new Date(entry.dueAt).toISOString()}`).join(", ") || "none"}`);
+  if (!runs.length) io.out("No runs yet.");
+  for (const entry of runs) {
+    io.out(historyLine(entry, { width: 160 }));
+    if (entry.errorDetail && entry.passed === false) for (const line of entry.errorDetail.split("\n").slice(-6)) io.out(`    ${line}`);
+  }
+  return 0;
+}
+
+/**
+ * Redraws the status every --interval seconds (default 2) until Ctrl-C: a
+ * terminal is cleared first; anything else gets the text again only when it
+ * changed. --count N stops after N rounds (scripts and tests).
+ */
+async function commandWatch(options, io) {
+  const state = stateFrom(options);
+  const config = await state.loadConfig().catch(() => null);
+  const interval = options.interval === undefined ? 2 : Number(options.interval);
+  if (!(interval > 0)) throw new Error("--interval must be a number of seconds");
+  const count = options.count === undefined ? Infinity : Number(options.count);
+  const tty = io.isTTY ?? Boolean(process.stdout.isTTY);
+  const stop = new AbortController();
+  const onSignal = () => stop.abort();
+  process.once("SIGINT", onSignal);
+  let previous = null;
+  try {
+    for (let round = 0; round < count && !stop.signal.aborted; round += 1) {
+      const live = await localStatus(state, config, options, io.fetch);
+      const { runs } = await recentRuns(state, config, options, 8, io.fetch);
+      const text = live ? formatStatus(live, runs, { recent: 8 }) : `The agent is not running (its status server did not answer). Trying again every ${interval} s.`;
+      if (tty) io.out(`\x1b[H\x1b[2J${new Date().toLocaleTimeString()}  home-compute-agent watch (Ctrl-C stops)\n\n${text}`);
+      else if (text.replace(/\d+ s (ago)?/g, "") !== previous) io.out(`--- ${new Date().toISOString()}\n${text}`);
+      previous = text.replace(/\d+ s (ago)?/g, "");
+      if (round + 1 < count) await (io.sleep ?? ((ms, signal) => new Promise((resolve) => {
+        const timer = setTimeout(resolve, ms);
+        signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+      })))(interval * 1000, stop.signal);
+    }
+  } finally {
+    process.removeListener("SIGINT", onSignal);
+  }
+  return 0;
+}
+
+/** pause, resume, drain [--cancel] and restart: one POST to the running agent. */
+async function commandControl(command, options, io) {
+  const state = stateFrom(options);
+  const config = await state.loadConfig().catch(() => null);
+  const server = await localServer(state, config, options);
+  if (!server) throw new Error(`no status token in ${options["token-file"] ?? state.statusTokenPath}; is the agent enrolled, and is this its user?`);
+  const target = { pause: "/v1/pause", resume: "/v1/resume", drain: "/v1/drain", restart: "/v1/restart" }[command];
+  const body = command === "drain" ? { drain: !options.cancel } : {};
+  let live;
+  try {
+    live = await localRequest(server, target, { method: "POST", body, fetch: io.fetch });
+  } catch (error) {
+    if (error.name === "TimeoutError" || error.cause?.code === "ECONNREFUSED" || /fetch failed/.test(error.message)) {
+      throw new Error("the agent is not running (its status server did not answer)");
+    }
+    throw error;
+  }
+  const said = {
+    pause: "Paused: this machine claims nothing new until \"home-compute-agent resume\". Running jobs finish.",
+    resume: "Resumed: this machine takes jobs again.",
+    drain: options.cancel ? "Drain cancelled." : `Draining: no new jobs; the agent restarts once ${live.current?.length ? `its ${live.current.length} running job${live.current.length === 1 ? "" : "s"} finish and are reported` : "its results are sent"}.`,
+    restart: "Restarting: running jobs carry on and the agent picks them up again when it is back.",
+  }[command];
+  io.out(said);
   return 0;
 }
 
@@ -210,7 +337,7 @@ async function commandDoctor(options, io) {
   } else {
     report("ok", `allowImages: ${config.allowImages.join(", ")}${config.allowLocalImages ? " (and local images)" : ""}`);
   }
-  const live = await localStatus(state, config);
+  const live = await localStatus(state, config, options, io.fetch);
   let runtime = null;
   try {
     runtime = createRuntime(config, { state, env: io.env });
@@ -317,6 +444,8 @@ export async function main(argv = process.argv.slice(2), io = {}) {
     stdin: io.stdin ?? process.stdin,
     fetch: io.fetch ?? globalThis.fetch,
     env: io.env ?? process.env,
+    isTTY: io.isTTY,
+    sleep: io.sleep,
   };
   let options;
   try {
@@ -338,6 +467,9 @@ export async function main(argv = process.argv.slice(2), io = {}) {
     if (command === "enrol" || command === "enroll") return await commandEnrol(options, streams);
     if (command === "run") return await commandRun(options, streams);
     if (command === "status") return await commandStatus(options, streams);
+    if (command === "history") return await commandHistory(options, streams);
+    if (command === "watch") return await commandWatch(options, streams);
+    if (["pause", "resume", "drain", "restart"].includes(command)) return await commandControl(command, options, streams);
     if (command === "doctor") return await commandDoctor(options, streams);
     streams.error(`Unknown command ${command}\n\n${USAGE}`);
     return 2;

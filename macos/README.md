@@ -1,6 +1,9 @@
 # Home Compute Bar
 
-A small native macOS menu bar app that monitors a Home Compute controller: which forecast jobs
+A small native macOS menu bar app with two faces. In **agent mode** it shows this Mac as a
+worker in the hosted cluster: what its agent runs now, its recent runs, whether it is connected,
+and quick actions (see [Agent mode](#agent-mode)). In **controller mode** it monitors the older
+local Home Compute controller: which forecast jobs
 are running, when each runs next, what the last run did, and which model runs were last published.
 It can also run, pause and resume jobs, and its settings window is a control panel that sets up,
 starts, stops and configures Home Compute on this Mac (services, R2 storage, the worker image and the
@@ -28,7 +31,63 @@ The app bundle has `LSUIElement` set, so it shows only a menu bar icon and no Do
 Bundle id: `dev.sprintengine.home-compute-bar`. If the app is running when you reinstall it,
 quit it from its popover and open it again.
 
-## Configure
+## Agent mode
+
+When this Mac is enrolled (`~/Library/Application Support/home-compute/config.json` exists), the
+app shows its agent ([agent/](../agent/README.md), `home-compute-agent run` under the LaunchAgent
+`dev.homecompute.agent`). It reads the agent's local status API on 127.0.0.1 (the port is
+`statusPort` in the agent's config.json, 4787) with the token in the agent's 0600 `status-token`
+file, every 2 s while a job runs and every 5 s otherwise. It never asks the old controller anything.
+
+- **Menu bar icon**: a box (`shippingbox`); while a job runs it fills and empties and the job's name
+  is beside it (`gfs +1` for two). A pause sign when this Mac takes no jobs (paused here, drained on
+  the dashboard, or draining), a cloud with a slash when the agent cannot reach the control plane,
+  and a warning sign when the agent does not answer. A red dot means a run failed since you last
+  opened the popover.
+- **Popover**: the machine, Connected or not, when it last synced; a card when it is paused,
+  draining, offline or not running (with Resume, Cancel or Start); **Running now** with each job's
+  phase, CPU, memory against its limit, and elapsed time; **Recent runs** with ✓ (passed), ✗
+  (failed) or – (cancelled), the outcome or exit code, duration and when. Hover a run for its error
+  and traceback; click it for the history window.
+- **History window** (History…, ⌘Y): the last 50 runs; the selected one's times, exit code, peak
+  memory, CPU, image and digest, whether the control plane has its result, and the full error with
+  Copy error and Open in dashboard.
+- **Actions**: Pause taking jobs / Resume taking jobs (kept across restarts); Restart agent › Restart
+  now (running jobs carry on and are picked up again) or Restart when the running jobs finish (a
+  drain); Dashboard (the agent reports hc-core's `DASHBOARD_URL`; Settings can set another);
+  Log (the agent's log in Console); Settings…; Quit. When the agent does not answer, Restart and
+  Start run `launchctl kickstart -k gui/<uid>/dev.homecompute.agent`.
+- **Notifications**: off by default; **Notify when a job fails on this Mac** in Settings turns them
+  on. Only failures after the app started notify.
+- **Launch at login**: in Settings, as in controller mode.
+
+`menubar.json` holds the mode and the agent settings; every field is optional:
+
+```json
+{ "mode": "agent",
+  "agent": { "stateDir": "~/Library/Application Support/home-compute", "port": 4787, "tokenFile": "",
+             "dashboardUrl": "", "logFile": "", "launchdLabel": "", "notifyOnFailure": true } }
+```
+
+`mode` is `agent` or `controller`; unset, it is `agent` when this Mac is enrolled. Settings ›
+Show switches it without a restart. `launchdLabel` defaults to `dev.homecompute.agent` only for
+the default state directory, so an app pointed at a development agent never kickstarts the real
+one (`-` turns it off).
+
+To try it against a second agent from a checkout, without touching the real one:
+
+```sh
+node cloud/scripts/agent-status-demo.mjs           # hc-web + hc-core under wrangler dev, an agent on FakeRuntime on :4797
+# then type: history, run gfs, run harmonie, cancel JOB, drain-web, status
+echo '{"mode": "agent", "agent": {"stateDir": "/tmp/hc-status-demo/agent", "notifyOnFailure": true}}' > /tmp/hcb-demo.json
+HOME_COMPUTE_BAR_CONFIG=/tmp/hcb-demo.json "build/Home Compute Bar.app/Contents/MacOS/HomeComputeBar"
+```
+
+`HCB_SNAPSHOTS=/tmp/hcb-snapshots swift test --filter AgentSnapshotTests` renders the popover in
+each state, the history window, the settings and the icons to PNGs from the real agent's answers
+(`Tests/HomeComputeBarTests/AgentFixtures.swift`).
+
+## Configure (controller mode)
 
 The controller URL and API token are read from `~/.config/home-compute/menubar.json`:
 
@@ -170,7 +229,11 @@ card and the log sheet to PNGs, driven by the fake script.
 
 | File | Purpose |
 | --- | --- |
-| `Sources/HomeComputeBar/App.swift` | `@main`, `MenuBarExtra` + `Settings` scenes, status icon rendering, launch-time state read |
+| `Sources/HomeComputeBar/App.swift` | `@main`, `AppModel` (the mode), `MenuBarExtra` + `Settings` scenes, status icon rendering, launch-time state read |
+| `Sources/HomeComputeBar/AgentStore.swift` | Agent mode: `@MainActor @Observable` state, polling, icon state, failure notifications, actions |
+| `Sources/HomeComputeBar/AgentClient.swift` | Agent mode: settings, finding the status API and token, the API client |
+| `Sources/HomeComputeBar/AgentModels.swift` | Agent mode: lenient decoding of `/v1/status` and `/v1/history` |
+| `Sources/HomeComputeBar/AgentViews.swift` | Agent mode: popover, history window, Agent settings |
 | `Sources/HomeComputeBar/Store.swift` | `@MainActor @Observable` state, polling, SSE loop, failure tracking, notifications |
 | `Sources/HomeComputeBar/APIClient.swift` | URLSession client and SSE parser |
 | `Sources/HomeComputeBar/Models.swift` | Lenient snapshot / event decoding |

@@ -1,0 +1,29 @@
+# The tray job for .github/workflows/ci.yml: add it under `jobs:` (a workflow change needs a
+# token with the workflow scope, which the pull request that added tray/ did not have).
+# It vets every target, runs the tests, builds the three binaries and keeps them as an artifact.
+  tray:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: tray
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tray/go.mod
+          cache-dependency-path: tray/go.sum
+      - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: |
+          for target in linux/amd64 linux/arm64 windows/amd64; do
+            CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" go vet ./...
+          done
+      - run: go test ./...
+      - run: ./build.sh
+        env:
+          VERSION: ${{ github.sha }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: home-compute-tray
+          path: tray/dist/
+          if-no-files-found: error

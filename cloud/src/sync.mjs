@@ -27,6 +27,12 @@ const ACTIVE = new Set(ACTIVE_STATES);
 const PHASE_COLUMNS = { "starting-vm": "vm_started_at", pulling: "pull_started_at", running: "started_at", reporting: "reporting_at" };
 /** The agent's settings for its runtime (§4.4); fixed until the dashboard can set them. */
 export const AGENT_CONFIG = { idleStopSeconds: 300, keepWarmSeconds: 600 };
+
+/** The agent's `config`: the VM timings, and the dashboard's address (DASHBOARD_URL) for its local menu bar or tray app's "Open dashboard". */
+export function agentConfig(env = {}) {
+  const url = typeof env.DASHBOARD_URL === "string" && /^https?:\/\/\S+$/i.test(env.DASHBOARD_URL) ? env.DASHBOARD_URL : null;
+  return url ? { ...AGENT_CONFIG, dashboardUrl: url } : AGENT_CONFIG;
+}
 /** hc-core's own redaction: credential patterns only (the agent already removed the exact secret values). */
 export const redactPatterns = createRedactor([]);
 
@@ -377,7 +383,9 @@ export async function sync(db, request, { machine: row, rotated, now, ip, env = 
     claims,
     cancel,
     upcoming,
-    config: AGENT_CONFIG,
+    config: agentConfig(env),
+    // The dashboard's drain of this machine, so the agent's local status can say why it claims nothing.
+    machine: { drain: Boolean(machine.drain) },
     update: null,
     provisioningTasks: [],
     rotateCredential,
