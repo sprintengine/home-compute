@@ -42,6 +42,7 @@
       "currents": { "maxAgeHours": 36, "pointer": "weather/currents.json" },
       "blend": { "maxAgeHours": 3, "pointer": "weather/blend.json" },
       "wind-obs": { "maxAgeHours": 6, "pointer": "marine/wind-observations.json" },
+      "warnings": { "maxAgeHours": 3, "pointer": "marine/warnings.json" },
       "forecast-archive": { "maxAgeHours": 3, "pointer": "verify/forecast-archive.json" },
       "verify": { "maxAgeHours": 36, "pointer": "verify/scores.json" }
     }
