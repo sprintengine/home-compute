@@ -35,7 +35,7 @@
   "containers": [
     {
       "class_name": "HcContainerBasic",
-      "image": "registry.cloudflare.com/29e356a26664bc14b4e5fd88cf533433/wingfoil-forecast@sha256:75f24418d6cca2828c65addd5abc7b28da82c66d13a920d9e37fbfb2aae85210",
+      "image": "registry.cloudflare.com/29e356a26664bc14b4e5fd88cf533433/wingfoil-forecast@sha256:f1771973fc26a1075cd40fed438a1750db900c1b1d0f8b0c6c0ee9f3bb8cd479",
       "instance_type": "basic",
       "max_instances": 2
     }
@@ -46,9 +46,9 @@
   "migrations": [{ "tag": "v1-cloudflare-containers", "new_sqlite_classes": ["HcContainerBasic"] }],
   "vars": {
     // Empty until a real image is deployed: until then a Cloudflare job's run fails with how to set it.
-    "HC_CONTAINER_IMAGE": "registry.cloudflare.com/29e356a26664bc14b4e5fd88cf533433/wingfoil-forecast@sha256:75f24418d6cca2828c65addd5abc7b28da82c66d13a920d9e37fbfb2aae85210",
+    "HC_CONTAINER_IMAGE": "registry.cloudflare.com/29e356a26664bc14b4e5fd88cf533433/wingfoil-forecast@sha256:f1771973fc26a1075cd40fed438a1750db900c1b1d0f8b0c6c0ee9f3bb8cd479",
     // The image the deployed one was copied from (its multi-platform ghcr digest): a job pinned to it runs here.
-    "HC_CONTAINER_SOURCE": "ghcr.io/sprintengine/wingfoil-forecast:2026.11.04@sha256:c5fe4cf7d35ac2e43bd3e7816c6c198eb5ef8dfdfd39a36c02e6cb0ac726682a"
+    "HC_CONTAINER_SOURCE": "ghcr.io/sprintengine/wingfoil-forecast:2026.11.08@sha256:10c169d0b8a74d01b143d6207dbb66968ce16fbcb13a984dda163cafa8d7a24d"
   }
   // Secrets (wrangler secret put NAME -c wrangler.core.jsonc), kept out of this file:
   //   VAULT_PRIVATE_KEY    the vault's RSA-OAEP private key (PKCS #8, base64); only hc-core can open secrets.
